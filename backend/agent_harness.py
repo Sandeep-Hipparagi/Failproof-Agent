@@ -1,7 +1,9 @@
 """LangGraph-backed Gemini tool loop with concurrent acoustic filler. Developed by Sandeep Hipparagi."""
 from __future__ import annotations
 import asyncio
+import base64
 import hashlib
+import inspect
 import json
 import os
 import time
@@ -140,24 +142,27 @@ class AgentHarness:
 
     async def _filler(self, state):
         try:
-            audio = await self.sarvam.synthesize("Let me check the menus and recent reviews around you...")
-            await _emit(state, {"type": "audio", "text": "Let me check the menus and recent reviews around you...", "audio": __import__("base64").b64encode(audio).decode()})
+            filler_text = "Let me check the menus and recent reviews around you..."
+            audio = await self.sarvam.synthesize(filler_text)
+            if audio:
+                await _emit(state, {"type": "audio", "text": filler_text, "audio": base64.b64encode(audio).decode()})
         except Exception:
             await _emit(state, {"type": "telemetry", "message": "Sarvam filler unavailable; tool execution continues"})
 
     async def tts_response_and_graph_commit(self, state: dict[str, Any]) -> dict[str, Any]:
-        response = state.get("response", "") or "I’ve checked that for you."
+        response = (state.get("response", "") or "").strip() or "I’ve checked that for you."
         await self.memory.ingest_episode(state.get("user_id", state["session_id"]), f"User: {state.get('last_user_transcript','')}\nAssistant: {response}")
         await _emit(state, {"type": "response", "text": response})
         try:
             audio = await self.sarvam.synthesize(response)
-            payload = {"type": "audio", "text": response, "audio": __import__("base64").b64encode(audio).decode()}
-            offer = state.get("pending_offer")
-            if offer and _contains_offer_terms(response, offer):
-                offer["offer_playback_verified"] = False
-                offer["playback_completed_server_ts"] = None
-                payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True})
-            await _emit(state, payload)
+            if audio:
+                payload = {"type": "audio", "text": response, "audio": base64.b64encode(audio).decode()}
+                offer = state.get("pending_offer")
+                if offer and _contains_offer_terms(response, offer):
+                    offer["offer_playback_verified"] = False
+                    offer["playback_completed_server_ts"] = None
+                    payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True})
+                await _emit(state, payload)
         except Exception as exc:
             await _emit(state, {"type": "telemetry", "message": f"Sarvam voice output unavailable: {exc}"})
         return state
@@ -205,7 +210,6 @@ def _contains_offer_terms(text: str, offer: dict[str, Any]) -> bool:
 
 def _function_declaration(name, fn):
     from google.genai import types
-    import inspect
     hints = inspect.signature(fn).parameters
     props = {}
     required = []
