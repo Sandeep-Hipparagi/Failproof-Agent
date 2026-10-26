@@ -248,9 +248,9 @@ class ControlPlane:
         return entry
 
     def snapshot(self, session_id: str, phase: str, state: dict[str, Any]):
-        keys = ("pending_offer", "last_user_speech_started_server_ts", "last_user_transcript_server_ts", "candidate_restaurants")
+        keys = ("pending_offer", "reservation_offer", "last_user_speech_started_server_ts", "last_user_transcript_server_ts", "candidate_restaurants")
         snap = self.redact({"session_id": session_id, "phase": phase, "server_ts": self.timestamp(), **{k: deepcopy(state.get(k)) for k in keys}})
-        offer = snap.get("pending_offer") or {}
+        offer = snap.get("pending_offer") or snap.get("reservation_offer") or {}
         snap.update({"offer_id": offer.get("offer_id"), "offer_playback_verified": offer.get("offer_playback_verified", False), "playback_completed_server_ts": offer.get("playback_completed_server_ts")})
         self.snapshots.append(snap)
         self._append_block(record_type="snapshot", session_id=session_id, policy_id="trace_state_snapshot",
@@ -415,10 +415,12 @@ class ControlPlane:
                 related = [s for s in self.snapshots if s["session_id"] == row["session_id"] and s["phase"] == "before"]
                 if related:
                     s = related[-1]
+                    offer = s.get("pending_offer") or s.get("reservation_offer") or {}
                     speech_started = s.get("last_user_speech_started_server_ts")
                     transcript_received = s.get("last_user_transcript_server_ts")
-                    playback_completed = s.get("playback_completed_server_ts")
-                    checks["CHECK_CAUSAL_AUDIO_ACK"] &= bool(s.get("offer_playback_verified") and speech_started is not None and transcript_received is not None and playback_completed is not None and speech_started > playback_completed and transcript_received >= speech_started)
+                    playback_completed = s.get("playback_completed_server_ts") or offer.get("playback_completed_server_ts")
+                    verified = s.get("offer_playback_verified") or offer.get("offer_playback_verified", False)
+                    checks["CHECK_CAUSAL_AUDIO_ACK"] &= bool(verified and speech_started is not None and transcript_received is not None and playback_completed is not None and speech_started > playback_completed and transcript_received >= speech_started)
                 else:
                     checks["CHECK_CAUSAL_AUDIO_ACK"] = False
         for name, ok in checks.items():

@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from typing import Any, TypedDict, get_origin, get_type_hints
@@ -244,6 +245,8 @@ class AgentHarness:
                 hold["restaurant_name"] = place.get("name", hold["place_id"])
                 state["pending_reservation"] = hold
                 state["pending_offer"] = _make_offer(state, hold)
+                result["restaurant_name"] = hold["restaurant_name"]
+                result["place_id"] = hold["place_id"]
             if call["name"] == "execute_reservation" and result.get("confirmed"):
                 self.enclave.committed(call["args"]["hold_token"], state["session_id"])
                 if cp: cp.executed_holds.append(call["args"]["hold_token"])
@@ -304,6 +307,8 @@ class AgentHarness:
                     offer["playback_ack_received"] = False
                     offer["playback_ack_token"] = secrets.token_urlsafe(24)
                     offer["audio_dispatched_server_ts"] = cp.timestamp() if cp else time.time()
+                    offer["presented"] = True
+                    state["reservation_offer"] = {**offer, "presented": True}
                     payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True,
                                     "playback_ack_token": offer["playback_ack_token"]})
                 await _emit(state, payload)
@@ -393,7 +398,7 @@ def _prune_tool_result(name: str, result: dict[str, Any]) -> dict[str, Any]:
     if name == "inspect_menu_and_dietary_fit":
         return {"dishes": result.get("dishes", [])[:3], "note": result.get("note") or result.get("disclaimer")}
     if name == "check_table_availability":
-        keys = ("available", "hold_token", "expires_in_seconds", "time_slot", "party_size", "reason")
+        keys = ("available", "hold_token", "expires_in_seconds", "time_slot", "party_size", "restaurant_name", "place_id", "reason")
         return {key: result[key] for key in keys if key in result}
     keys = ("confirmed", "booking_reference", "restaurant_name", "time_slot", "party_size", "place_id", "reason")
     return {key: result[key] for key in keys if key in result}
@@ -412,9 +417,75 @@ def _make_offer(state: dict[str, Any], details: dict[str, Any]) -> dict[str, Any
             "playback_ack_received": False, "playback_ack_token": None,
             "audio_dispatched_server_ts": None}
 
+NUMBER_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve"
+}
+
 def _contains_offer_terms(text: str, offer: dict[str, Any]) -> bool:
+    if not text or not offer:
+        return False
     normalized = text.casefold()
-    return all(str(offer.get(k, "")).casefold() in normalized for k in ("restaurant_name", "time_slot")) and str(offer.get("party_size")) in normalized
+
+    party_size = offer.get("party_size")
+    party_matches = False
+    if party_size is not None:
+        try:
+            ps_int = int(party_size)
+            word = NUMBER_WORDS.get(ps_int)
+            party_matches = str(ps_int) in normalized or (word is not None and word in normalized)
+        except (ValueError, TypeError):
+            party_matches = str(party_size).casefold() in normalized
+    else:
+        party_matches = True
+
+    restaurant_name = str(offer.get("restaurant_name", "")).strip().casefold()
+    name_matches = False
+    if restaurant_name:
+        if restaurant_name in normalized:
+            name_matches = True
+        else:
+            clean_name = re.sub(r"\(.*?\)", "", restaurant_name).strip()
+            aliases = re.findall(r"\((.*?)\)", restaurant_name)
+            if clean_name and clean_name in normalized:
+                name_matches = True
+            elif any(alias.strip().casefold() in normalized for alias in aliases if len(alias.strip()) >= 2):
+                name_matches = True
+            else:
+                tokens = [t for t in re.split(r"\W+", clean_name) if len(t) >= 4]
+                if tokens and any(t in normalized for t in tokens):
+                    name_matches = True
+    else:
+        name_matches = True
+
+    time_slot = str(offer.get("time_slot", "")).strip().casefold()
+    time_matches = False
+    if time_slot:
+        if time_slot in normalized:
+            time_matches = True
+        else:
+            m = re.match(r"^(\d{1,2}):(\d{2})", time_slot)
+            if m:
+                h = int(m.group(1))
+                min_str = m.group(2)
+                h12 = 12 if h % 12 == 0 else h % 12
+                meridiem = "pm" if h >= 12 else "am"
+                candidates = [
+                    f"{h}:{min_str}",
+                    f"{h:02d}:{min_str}",
+                    f"{h12}:{min_str} {meridiem}",
+                    f"{h12}:{min_str}{meridiem}",
+                    f"{h12} {meridiem}",
+                    f"{h12}{meridiem}",
+                ]
+                if min_str == "00":
+                    candidates.extend([f"{h12} o'clock", f"at {h12}"])
+                time_matches = any(cand in normalized for cand in candidates)
+    else:
+        time_matches = True
+
+    return party_matches and name_matches and time_matches
 
 def _function_declaration(name, fn):
     from google.genai import types

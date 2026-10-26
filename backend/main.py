@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
             if sarvam.api_key:
                 try:
                     await sarvam.synthesize("Checking the menus and latest reviews around you...")
+                    await sarvam.synthesize("I couldn't safely finish that request. Please try again.")
                 except Exception as exc:
                     control.alert("WARNING", "SARVAM_FILLER_PREWARM_FAILED", "system", type(exc).__name__)
             yield
@@ -213,8 +214,8 @@ async def websocket_endpoint(ws: WebSocket):
         logger.info("\033[92m[STT-IN]\033[0m final transcript session=%s chars=%d", session_id, len(transcript or ""))
         state["voice_approval_verified"] = False
         # A spoken affirmative is accepted only for the exact offer already played to this session.
-        offer = state.get("reservation_offer", {})
-        if offer.get("presented") and _affirmative(transcript):
+        offer = state.get("reservation_offer") or state.get("pending_offer") or {}
+        if (offer.get("presented") or offer.get("playback_ack_received") or offer.get("offer_playback_verified")) and _affirmative(transcript):
             state["voice_approval_verified"] = True
         live = control.event(session_id, "STT_FINAL_TRANSCRIPT", text=transcript)
         await ws.send_json({"type": "live_event", "event": live})
@@ -244,6 +245,7 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "telemetry", "message": "Voice output is unavailable; the text response is shown below."})
             finally:
                 control.sessions[session_id]["turn_durations"].append(time.perf_counter() - turn_started)
+        state["last_user_speech_started_server_ts"] = None
         await ws.send_json({"type": "status", "state": "Idle"})
 
     try:
@@ -261,6 +263,8 @@ async def websocket_endpoint(ws: WebSocket):
                         audio_overflow = True
                         control.alert("WARNING", "WS_AUDIO_LIMIT", session_id, "Audio turn exceeded the 60 second input limit")
                     else:
+                        if not audio_chunks and state.get("last_user_speech_started_server_ts") is None:
+                            state["last_user_speech_started_server_ts"] = control.timestamp()
                         audio_chunks.append(chunk)
                         audio_size += len(chunk)
                 continue
@@ -282,6 +286,13 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "live_event", "event": live})
                 if event.get("interruption"):
                     control.sessions[session_id]["barge_ins"] += 1
+                    offer = state.get("pending_offer")
+                    if offer and offer.get("playback_ack_pending"):
+                        offer["offer_playback_verified"] = False
+                        offer["playback_completed_server_ts"] = None
+                        offer["playback_ack_pending"] = False
+                        offer["playback_ack_received"] = False
+                        offer["playback_ack_token"] = None
                 if task and not task.done():
                     cancelled_task = task
                     cancelled_task.cancel()
@@ -337,8 +348,8 @@ async def websocket_endpoint(ws: WebSocket):
                     control.playback_ack(offer["offer_id"], offer["playback_completed_server_ts"])
                     control.sessions[session_id]["playback_acks"] += 1
                     control.sessions[session_id]["playback_offers"] += 1
-                    control.event(session_id, "TTS_PLAYBACK_COMPLETED", offer_id=offer["offer_id"])
-                    await ws.send_json({"type": "live_event", "event": control.events[-1]})
+                    live = control.event(session_id, "TTS_PLAYBACK_COMPLETED", offer_id=offer["offer_id"])
+                    await ws.send_json({"type": "live_event", "event": live})
                     await ws.send_json({"type": "playback_verification", "status": "verified", "offer_id": offer["offer_id"]})
             elif kind == "TTS_PLAYBACK_INTERRUPTED":
                 offer = state.get("pending_offer")
@@ -355,8 +366,8 @@ async def websocket_endpoint(ws: WebSocket):
                     offer["playback_ack_token"] = None
                     logger.warning("\033[93m[ACK-RECV]\033[0m playback interrupted session=%s offer=%s", session_id, offer["offer_id"])
                     control.sessions[session_id]["playback_offers"] += 1
-                    control.event(session_id, "TTS_PLAYBACK_INTERRUPTED", offer_id=offer["offer_id"])
-                    await ws.send_json({"type": "live_event", "event": control.events[-1]})
+                    live = control.event(session_id, "TTS_PLAYBACK_INTERRUPTED", offer_id=offer["offer_id"])
+                    await ws.send_json({"type": "live_event", "event": live})
                     await ws.send_json({"type": "playback_verification", "status": "interrupted", "offer_id": offer["offer_id"]})
             elif kind == "SET_CONTEXT":
                 context_user_id = event.get("user_id")
