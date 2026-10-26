@@ -25,8 +25,8 @@ A minimal, voice-only Bengaluru restaurant concierge built around a fail-closed 
 
 1. Copy `.env.example` to `.env` and add `SARVAM_API_KEY` and `GEMINI_API_KEY`.
 2. Optionally add `GOOGLE_PLACES_API_KEY` and start Neo4j with `docker compose up -d`.
-3. Create a virtual environment and install dependencies with `pip install -r requirements.txt`.
-4. From the project root, run `uvicorn backend.main:app --reload`.
+3. Create a virtual environment and install dependencies: `python -m venv .venv`, then `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` on Windows (or activate `.venv` and run `python -m pip install -r requirements.txt` elsewhere).
+4. Start the server with the same environment: `.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload` on Windows (or `python -m uvicorn backend.main:app --reload` after activating `.venv`). Running Uvicorn outside the project environment can silently disable Gemini if `google-genai` is missing.
 5. Open `http://localhost:8000`, allow microphone access, and hold the center orb while speaking.
 
 To enable hosted telemetry, obtain the tenant's ingest URL, `events:add` API key, and client certificate/key from the platform administrator. Configure `FAILPROOF_PLATFORM_INGEST_URL`, `FAILPROOF_PLATFORM_API_KEY`, `FAILPROOF_PLATFORM_CLIENT_CERT`, and `FAILPROOF_PLATFORM_CLIENT_KEY` in `.env`. Delivery retries in memory with backoff; absent or invalid configuration leaves local operation available.

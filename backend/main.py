@@ -1,7 +1,9 @@
 """FastAPI websocket application for the voice-only restaurant concierge. Developed by Sandeep Hipparagi."""
 from __future__ import annotations
 import asyncio
+import base64
 import json
+import logging
 import math
 import secrets
 import time
@@ -28,6 +30,7 @@ from .platform_bridge import PlatformBridge
 from .tools.restaurant_tools import release_tool_session, set_degraded_callback, set_http_client
 
 MAX_AUDIO_BYTES = 16000 * 2 * 60
+logger = logging.getLogger(__name__)
 memory = GraphMemory()
 enclave = Enclave()
 sarvam = SarvamClient()
@@ -57,6 +60,7 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             await platform_bridge.stop()
+            await harness.close()
             sarvam.http_client = None
             set_http_client(None)
             await memory.close()
@@ -137,8 +141,9 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     session_id = uuid.uuid4().hex
     user_id = session_id
-    state: dict[str, Any] = {"session_id": session_id, "user_id": user_id, "user_location": {"lat": 12.9716, "lng": 77.5946}, "candidate_restaurants": [], "pending_reservation": None, "pending_offer": None, "voice_approval_verified": False, "last_user_transcript": "", "last_user_transcript_server_ts": None, "transcript_received_server_ts": None, "reservation_offer": {}, "messages": [], "emit": lambda item: ws.send_json(item)}
+    state: dict[str, Any] = {"session_id": session_id, "user_id": user_id, "user_location": {"lat": 12.9716, "lng": 77.5946}, "candidate_restaurants": [], "pending_reservation": None, "pending_offer": None, "voice_approval_verified": False, "last_user_transcript": "", "last_user_speech_started_server_ts": None, "last_user_transcript_server_ts": None, "transcript_received_server_ts": None, "reservation_offer": {}, "messages": [], "emit": lambda item: ws.send_json(item)}
     control.start_session(session_id, state)
+    logger.info("\033[96m[WS]\033[0m connected session=%s sarvam_configured=%s gemini_configured=%s", session_id, bool(sarvam.api_key), bool(harness.client))
     now = time.monotonic()
     async with session_registry_lock:
         expired = [key for key, value in session_registry.items() if now - value["connected_at"] > 1800]
@@ -170,6 +175,7 @@ async def websocket_endpoint(ws: WebSocket):
         audio_size = 0
         audio_overflow = False
         if not pcm: return
+        logger.info("\033[96m[STT-IN]\033[0m audio finalized session=%s pcm_bytes=%d sample_rate=16000", session_id, len(pcm))
         await ws.send_json({"type": "status", "state": "Verifying Tools"})
         try:
             started = time.perf_counter()
@@ -177,6 +183,7 @@ async def websocket_endpoint(ws: WebSocket):
             transcript = await sarvam.transcribe(pcm, 16000)
             control.stage(session_id, "sarvam_stt", started, model="saaras:v3", sample_rate=16000, channels=1)
         except Exception as exc:
+            logger.exception("\033[91m[STT-IN]\033[0m transcription failed session=%s", session_id)
             control.alert("WARNING", "SARVAM_STT_UNAVAILABLE", session_id, type(exc).__name__)
             await ws.send_json({"type": "telemetry", "message": f"Sarvam transcription unavailable: {exc}"})
             await ws.send_json({"type": "status", "state": "Idle"})
@@ -184,6 +191,7 @@ async def websocket_endpoint(ws: WebSocket):
         state["last_user_transcript"] = transcript
         state["transcript_received_server_ts"] = control.timestamp()
         state["last_user_transcript_server_ts"] = state["transcript_received_server_ts"]
+        logger.info("\033[92m[STT-IN]\033[0m final transcript session=%s chars=%d", session_id, len(transcript or ""))
         state["voice_approval_verified"] = False
         # A spoken affirmative is accepted only for the exact offer already played to this session.
         offer = state.get("reservation_offer", {})
@@ -201,8 +209,20 @@ async def websocket_endpoint(ws: WebSocket):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                logger.exception("\033[91m[LLM-REASON]\033[0m turn failed session=%s", session_id)
                 control.alert("WARNING", "CONCIERGE_TURN_FAILED", session_id, type(exc).__name__)
-                await ws.send_json({"type": "telemetry", "message": "The assistant turn failed safely. Please try again."})
+                fallback_text = "I couldn't safely finish that request. Please try again."
+                await ws.send_json({"type": "response", "text": fallback_text})
+                try:
+                    fallback_audio = await sarvam.synthesize(fallback_text)
+                    if fallback_audio:
+                        await ws.send_json({"type": "audio", "text": fallback_text,
+                                            "audio": base64.b64encode(fallback_audio).decode("ascii")})
+                    else:
+                        raise RuntimeError("Sarvam returned no fallback audio")
+                except Exception:
+                    logger.exception("\033[91m[TTS-OUT]\033[0m safe fallback speech failed session=%s", session_id)
+                    await ws.send_json({"type": "telemetry", "message": "Voice output is unavailable; the text response is shown below."})
             finally:
                 control.sessions[session_id]["turn_durations"].append(time.perf_counter() - turn_started)
         await ws.send_json({"type": "status", "state": "Idle"})
@@ -238,6 +258,7 @@ async def websocket_endpoint(ws: WebSocket):
                 continue
             kind = event.get("type")
             if kind == "USER_SPEAKING_START":
+                state["last_user_speech_started_server_ts"] = control.timestamp()
                 live = control.event(session_id, "USER_SPEAKING_START", interruption=bool(event.get("interruption")))
                 await ws.send_json({"type": "live_event", "event": live})
                 if event.get("interruption"):
@@ -266,6 +287,7 @@ async def websocket_endpoint(ws: WebSocket):
                     audio_size = 0
                     control.alert("WARNING", "WS_DUPLICATE_AUDIO_END", session_id, "Ignored overlapping audio turn")
                 else:
+                    logger.info("\033[96m[STT-IN]\033[0m AUDIO_END received session=%s bytes=%d", session_id, audio_size)
                     task = asyncio.create_task(process_audio())
             elif kind == "LOCATION":
                 try:
@@ -292,6 +314,7 @@ async def websocket_endpoint(ws: WebSocket):
                     offer["playback_ack_pending"] = False
                     offer["playback_ack_received"] = True
                     offer["playback_ack_token"] = None
+                    logger.info("\033[92m[ACK-RECV]\033[0m playback completed session=%s offer=%s", session_id, offer["offer_id"])
                     control.playback_ack(offer["offer_id"], offer["playback_completed_server_ts"])
                     control.sessions[session_id]["playback_acks"] += 1
                     control.sessions[session_id]["playback_offers"] += 1
@@ -311,12 +334,17 @@ async def websocket_endpoint(ws: WebSocket):
                     offer["playback_ack_pending"] = False
                     offer["playback_ack_received"] = False
                     offer["playback_ack_token"] = None
+                    logger.warning("\033[93m[ACK-RECV]\033[0m playback interrupted session=%s offer=%s", session_id, offer["offer_id"])
                     control.sessions[session_id]["playback_offers"] += 1
                     control.event(session_id, "TTS_PLAYBACK_INTERRUPTED", offer_id=offer["offer_id"])
                     await ws.send_json({"type": "live_event", "event": control.events[-1]})
                     await ws.send_json({"type": "playback_verification", "status": "interrupted", "offer_id": offer["offer_id"]})
             elif kind == "SET_CONTEXT":
-                state["user_id"] = str(event.get("user_id") or user_id)
+                context_user_id = event.get("user_id")
+                if isinstance(context_user_id, str) and 1 <= len(context_user_id) <= 128:
+                    state["user_id"] = context_user_id
+                else:
+                    control.alert("WARNING", "WS_INVALID_CONTEXT", session_id, "Ignored invalid client memory identifier")
             await ws.send_json({"type": "home_metrics", "metrics": control.metrics()})
     except WebSocketDisconnect:
         if task and not task.done(): task.cancel()

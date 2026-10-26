@@ -232,7 +232,7 @@ class ControlPlane:
         return entry
 
     def snapshot(self, session_id: str, phase: str, state: dict[str, Any]):
-        keys = ("pending_offer", "last_user_transcript_server_ts", "candidate_restaurants")
+        keys = ("pending_offer", "last_user_speech_started_server_ts", "last_user_transcript_server_ts", "candidate_restaurants")
         snap = self.redact({"session_id": session_id, "phase": phase, "server_ts": self.timestamp(), **{k: deepcopy(state.get(k)) for k in keys}})
         offer = snap.get("pending_offer") or {}
         snap.update({"offer_id": offer.get("offer_id"), "offer_playback_verified": offer.get("offer_playback_verified", False), "playback_completed_server_ts": offer.get("playback_completed_server_ts")})
@@ -254,7 +254,7 @@ class ControlPlane:
         self.policy_hits[policy_id] += 1
         if verdict.upper() in {"ALLOW", "STEER", "BREAK-LOOP"}:
             print(f"[FAILPROOF-WORM #{row['index']:04d}] verdict={row['verdict']} | policy={policy_id} | reason={row['reason_code']} | hash={row['entry_hash'][:4]}...{row['entry_hash'][-4:]}", flush=True)
-        if row["reason_code"] in {"AUDIO_PLAYBACK_UNVERIFIED", "STALE_CONFIRMATION_TIMESTAMP"}:
+        if row["reason_code"] in {"AUDIO_PLAYBACK_UNVERIFIED", "STALE_CONFIRMATION_TIMESTAMP", "PREMATURE_CONFIRMATION_SPEECH"}:
             self.alert("CRITICAL", row["reason_code"], session_id, reason)
         elif verdict.upper() == "BREAK-LOOP":
             self.alert("WARNING", "TOOL_LOOP_BROKEN", session_id, reason)
@@ -345,7 +345,10 @@ class ControlPlane:
                 related = [s for s in self.snapshots if s["session_id"] == row["session_id"] and s["phase"] == "before"]
                 if related:
                     s = related[-1]
-                    checks["CHECK_CAUSAL_AUDIO_ACK"] &= bool(s["offer_playback_verified"] and s["last_user_transcript_server_ts"] and s["playback_completed_server_ts"] and s["last_user_transcript_server_ts"] > s["playback_completed_server_ts"])
+                    speech_started = s.get("last_user_speech_started_server_ts")
+                    transcript_received = s.get("last_user_transcript_server_ts")
+                    playback_completed = s.get("playback_completed_server_ts")
+                    checks["CHECK_CAUSAL_AUDIO_ACK"] &= bool(s.get("offer_playback_verified") and speech_started is not None and transcript_received is not None and playback_completed is not None and speech_started > playback_completed and transcript_received >= speech_started)
                 else:
                     checks["CHECK_CAUSAL_AUDIO_ACK"] = False
         for name, ok in checks.items():
@@ -353,4 +356,3 @@ class ControlPlane:
         clean = sum(1 for s in self.sessions.values() if s["booking_status"] in {"NONE", "CONFIRMED"})
         return {"reliability_score": round(100 * clean / max(1, len(self.sessions)), 2), "checks": checks,
             "insights": (["Users frequently interrupt long readouts; shorten spoken menu summaries."] if sum(s["barge_ins"] for s in self.sessions.values()) >= 3 else []), "alerts": list(self.alerts)}
-

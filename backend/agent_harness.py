@@ -5,16 +5,19 @@ import base64
 import hashlib
 import inspect
 import json
+import logging
 import os
 import secrets
 import time
-from typing import Any, TypedDict
+from typing import Any, TypedDict, get_origin, get_type_hints
 
 from .failproof_enclave import Enclave, validate_tool_args
 from .graph_memory import GraphMemory
 from .resilience import resilient_call
 from .sarvam_client import SarvamClient
 from .tools.restaurant_tools import TOOL_FUNCTIONS, TOOL_SESSION_ID
+
+logger = logging.getLogger(__name__)
 
 class ConciergeState(TypedDict, total=False):
     session_id: str
@@ -24,6 +27,7 @@ class ConciergeState(TypedDict, total=False):
     pending_reservation: dict[str, Any] | None
     voice_approval_verified: bool
     last_user_transcript: str
+    last_user_speech_started_server_ts: float | None
     reservation_offer: dict[str, Any]
     pending_offer: dict[str, Any] | None
     transcript_received_server_ts: float | None
@@ -38,12 +42,23 @@ class AgentHarness:
         self.memory, self.enclave, self.sarvam = memory, enclave, sarvam
         self.model = None
         try:
+            if not os.getenv("GEMINI_API_KEY"):
+                raise RuntimeError("GEMINI_API_KEY is not configured")
             from google import genai
             self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
             self.model = "gemini-2.5-flash"
-        except Exception:
+            logger.info("Gemini client configured model=%s", self.model)
+        except Exception as exc:
             self.client = None
+            logger.warning("\033[93m[LLM-REASON]\033[0m model unavailable (%s); text fallback will be used", type(exc).__name__)
         self.graph = self._build_graph()
+
+    async def close(self) -> None:
+        if self.client:
+            async_client = getattr(self.client, "aio", None)
+            close = getattr(async_client, "aclose", None)
+            if close:
+                await close()
 
     def _build_graph(self):
         try:
@@ -88,6 +103,7 @@ class AgentHarness:
 
     async def agent_reasoning(self, state: dict[str, Any]) -> dict[str, Any]:
         if not self.client:
+            logger.error("\033[91m[LLM-REASON]\033[0m no Gemini client; configure GEMINI_API_KEY and install google-genai")
             state["response"] = "I’m ready to help find a restaurant. Add GEMINI_API_KEY to enable the live concierge model."
             state["pending_calls"] = []
             return state
@@ -96,11 +112,15 @@ class AgentHarness:
         config = types.GenerateContentConfig(system_instruction=_system_prompt(state), tools=[types.Tool(function_declarations=declarations)], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), thinking_config=types.ThinkingConfig(thinking_budget=0))
         contents = state["messages"][-12:]
         started = time.perf_counter()
+        logger.info("\033[96m[LLM-REASON]\033[0m request session=%s model=%s message_count=%d", state.get("session_id"), self.model, len(contents))
         try:
-            response = await resilient_call(lambda: asyncio.to_thread(self.client.models.generate_content, model=self.model, contents=contents, config=config), timeout=4.0, attempts=2, service="gemini")
+            async def generate():
+                return await self.client.aio.models.generate_content(model=self.model, contents=contents, config=config)
+            response = await resilient_call(generate, timeout=4.0, attempts=2, service="gemini")
         except Exception as exc:
             cp = getattr(self.enclave, "control_plane", None)
             if cp: cp.alert("WARNING", "GEMINI_FALLBACK", state["session_id"], f"Reasoning unavailable ({type(exc).__name__})")
+            logger.exception("\033[91m[LLM-REASON]\033[0m Gemini request failed session=%s", state.get("session_id"))
             state["response"] = "I can't reach the restaurant assistant right now. Please try again in a moment."
             state["pending_calls"] = []
             return state
@@ -109,18 +129,28 @@ class AgentHarness:
             cp.stage(state["session_id"], "gemini_reasoning", started)
             cp.query(state["session_id"], self.model, json.dumps(contents, default=str), time.perf_counter()-started)
         calls = []
-        for part in response.candidates[0].content.parts:
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates or not getattr(candidates[0], "content", None):
+            logger.error("\033[91m[LLM-REASON]\033[0m Gemini returned no candidate content session=%s", state.get("session_id"))
+            state["response"] = "I couldn't get a complete response just now. Please try again."
+            state["pending_calls"] = []
+            return state
+        for part in candidates[0].content.parts or []:
             if getattr(part, "function_call", None):
-                calls.append({"name": part.function_call.name, "args": dict(part.function_call.args or {})})
+                function_call = part.function_call
+                calls.append({"name": function_call.name, "args": dict(function_call.args or {}),
+                              "id": getattr(function_call, "id", None)})
             elif getattr(part, "text", None):
                 state["response"] = part.text
         state["pending_calls"] = calls
+        logger.info("\033[92m[LLM-REASON]\033[0m response session=%s tool_calls=%d text_chars=%d", state.get("session_id"), len(calls), len(state.get("response", "")))
         state["messages"].append({"role": "model", "content": response.candidates[0].content})
         return state
 
     async def failproof_policy_gate(self, state: dict[str, Any]) -> dict[str, Any]:
         cp = getattr(self.enclave, "control_plane", None)
         allowed = []
+        rejected = []
         for call in state.get("pending_calls", []):
             if cp: cp.snapshot(state["session_id"], "before", state)
             started = time.perf_counter()
@@ -136,23 +166,33 @@ class AgentHarness:
                     offer_id = Enclave.offer_id(state["session_id"], call["args"])
                     playback_ts = offer.get("playback_completed_server_ts")
                     transcript_ts = state.get("last_user_transcript_server_ts")
+                    speech_started_ts = state.get("last_user_speech_started_server_ts")
                     receipt = {"offer_id": offer_id,
-                               "causal_proof": {"playback_completed_ts": playback_ts, "transcript_received_ts": transcript_ts,
+                               "causal_proof": {"playback_completed_ts": playback_ts,
+                                                "speech_started_ts": speech_started_ts,
+                                                "transcript_received_ts": transcript_ts,
                                                 "delta_ms": (transcript_ts - playback_ts) * 1000 if playback_ts is not None and transcript_ts is not None else None},
                                "transcript_sha256": hashlib.sha256(str(state.get("last_user_transcript", "")).encode()).hexdigest()}
                 cp.audit(session_id=state["session_id"], policy_id=policy_id, tool_name=call["name"], verdict=verdict["verdict"], reason=verdict.get("reason", ""), prompt=verdict.get("inject_prompt"), **receipt)
             await _emit(state, {"type": "enclave", **verdict})
             if verdict["verdict"] == "allow": allowed.append(call)
-            elif verdict["verdict"] == "steer":
+            else:
+                rejected.append({"name": call["name"], "id": call.get("id"),
+                                 "response": {"error": verdict.get("reason", "Tool denied by runtime policy"),
+                                              "policy_verdict": verdict["verdict"]}})
+            if verdict["verdict"] == "steer":
                 state["response"] = "Please confirm by voice: " + _offer_sentence(state, call["args"])
                 offer = state.get("reservation_offer", {})
                 if not offer.get("presented"):
                     offer = {"restaurant_name": call["args"].get("restaurant_name"), "time_slot": call["args"].get("time_slot"), "party_size": call["args"].get("party_size"), "presented": True}
                     state["reservation_offer"] = offer
-                state["messages"].append({"role": "user", "content": verdict["inject_prompt"]})
-            else:
+            elif verdict["verdict"] != "allow":
                 state["response"] = "I can’t complete that action safely. Let’s try another approach."
         state["pending_calls"] = allowed
+        state["pretool_rejections"] = rejected
+        if rejected and not allowed:
+            state["messages"].append(_function_response_content(rejected))
+            state["pretool_rejections"] = []
         return state
 
     async def tool_execution(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -162,6 +202,7 @@ class AgentHarness:
         async def run(call):
             started = time.perf_counter()
             cp = getattr(self.enclave, "control_plane", None)
+            logger.info("\033[96m[TOOL-EXEC]\033[0m start session=%s tool=%s", state.get("session_id"), call["name"])
             await _emit(state, {"type": "tool_requested", "name": call["name"], "args": call["args"]})
             session_token = TOOL_SESSION_ID.set(state["session_id"])
             try:
@@ -197,12 +238,20 @@ class AgentHarness:
                 await self.memory.record_booking(state.get("user_id", state["session_id"]), call["args"]["restaurant_name"], result["booking_reference"])
                 state["pending_offer"] = None
             pruned = _prune_tool_result(call["name"], result)
+            logger.info("\033[92m[TOOL-EXEC]\033[0m complete session=%s tool=%s", state.get("session_id"), call["name"])
             await _emit(state, {"type": "tool", "name": call["name"], "result": pruned})
             return {"name": call["name"], "result": pruned}
         results = await asyncio.gather(*(run(call) for call in calls), return_exceptions=True)
         await asyncio.gather(filler_task, return_exceptions=True)
         state["tool_results"] = [r if isinstance(r, dict) else {"error": str(r)} for r in results]
-        state["messages"].append({"role": "user", "content": "Tool results: " + json.dumps(state["tool_results"], default=str)})
+        response_entries = list(state.pop("pretool_rejections", []))
+        for call, result in zip(calls, results):
+            if isinstance(result, dict):
+                function_result = result.get("result", {})
+            else:
+                function_result = {"error": str(result)}
+            response_entries.append({"name": call["name"], "id": call.get("id"), "response": function_result})
+        state["messages"].append(_function_response_content(response_entries))
         state["pending_calls"] = []
         return state
 
@@ -219,6 +268,7 @@ class AgentHarness:
         except Exception as exc:
             cp = getattr(self.enclave, "control_plane", None)
             if cp: cp.alert("WARNING", "SARVAM_FILLER_UNAVAILABLE", state["session_id"], type(exc).__name__)
+            logger.warning("\033[93m[TTS-OUT]\033[0m acoustic filler failed session=%s error=%s", state.get("session_id"), type(exc).__name__)
             await _emit(state, {"type": "telemetry", "message": "Sarvam filler unavailable; tool execution continues"})
 
     async def tts_response_and_graph_commit(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -246,6 +296,7 @@ class AgentHarness:
         except Exception as exc:
             cp = getattr(self.enclave, "control_plane", None)
             if cp: cp.alert("WARNING", "SARVAM_TTS_UNAVAILABLE", state["session_id"], type(exc).__name__)
+            logger.exception("\033[91m[TTS-OUT]\033[0m response synthesis failed session=%s", state.get("session_id"))
             await _emit(state, {"type": "telemetry", "message": f"Sarvam voice output unavailable: {exc}"})
         return state
 
@@ -269,6 +320,15 @@ async def _emit(state, message):
     if cb:
         result = cb(message)
         if asyncio.iscoroutine(result): await result
+
+
+def _function_response_content(entries: list[dict[str, Any]]):
+    from google.genai import types
+    parts = []
+    for entry in entries:
+        part_args = {"name": entry["name"], "response": entry["response"]}
+        parts.append(types.Part.from_function_response(**part_args))
+    return types.Content(role="tool", parts=parts)
 
 def _offer_sentence(state, args):
     offer = state.get("reservation_offer", {})
@@ -314,11 +374,22 @@ def _contains_offer_terms(text: str, offer: dict[str, Any]) -> bool:
 def _function_declaration(name, fn):
     from google.genai import types
     hints = inspect.signature(fn).parameters
+    resolved_hints = get_type_hints(fn)
     props = {}
     required = []
     for key, param in hints.items():
-        ann = param.annotation
-        typ = "ARRAY" if ann == list[str] else "INTEGER" if ann == int else "NUMBER" if ann in (float, int) else "STRING"
+        ann = resolved_hints.get(key, param.annotation)
+        typ = _schema_type(ann)
         props[key] = types.Schema(type=typ, items=types.Schema(type="STRING") if typ == "ARRAY" else None)
         if param.default is inspect.Parameter.empty: required.append(key)
     return types.FunctionDeclaration(name=name, description=fn.__doc__ or name, parameters=types.Schema(type="OBJECT", properties=props, required=required))
+
+
+def _schema_type(annotation: Any) -> str:
+    if get_origin(annotation) is list:
+        return "ARRAY"
+    if annotation is int:
+        return "INTEGER"
+    if annotation is float:
+        return "NUMBER"
+    return "STRING"

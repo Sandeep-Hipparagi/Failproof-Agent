@@ -87,7 +87,10 @@ def run_rehearsal() -> None:
     with patch.object(main.sarvam, "transcribe", fake_transcribe), patch.object(main, "harness", rehearsal):
         client = TestClient(main.app)
         with client.websocket_connect("/ws") as ws:
+            ws.send_json({"type": "SET_CONTEXT", "user_id": "smoke-browser-user"})
+            ws.receive_json()
             # Act 1: request discovery, then interrupt the offer and speak a premature yes.
+            ws.send_json({"type": "USER_SPEAKING_START"})
             ws.send_bytes(b"simulated pcm")
             ws.send_json({"type": "AUDIO_END"})
             first = _until(ws, lambda item: item.get("type") == "audio" and item.get("offer_id"))
@@ -96,6 +99,7 @@ def run_rehearsal() -> None:
 
             ws.send_json({"type": "TTS_PLAYBACK_INTERRUPTED", "offer_id": offer_id, "playback_ack_token": ack_token, "client_ts": int(time.time() * 1000)})
             _until(ws, lambda item: item.get("type") == "playback_verification" and item.get("status") == "interrupted")
+            ws.send_json({"type": "USER_SPEAKING_START", "interruption": True})
             ws.send_bytes(b"simulated pcm")
             ws.send_json({"type": "AUDIO_END"})
             act1 = _until(ws, lambda item: item.get("type") == "audio" and item.get("offer_id") == offer_id)
@@ -108,6 +112,7 @@ def run_rehearsal() -> None:
             ws.send_json({"type": "TTS_PLAYBACK_COMPLETED", "offer_id": offer_id, "playback_ack_token": ack_token, "client_ts": int(time.time() * 1000)})
             _until(ws, lambda item: item.get("type") == "playback_verification" and item.get("status") == "verified")
             time.sleep(0.05)
+            ws.send_json({"type": "USER_SPEAKING_START"})
             ws.send_bytes(b"simulated pcm")
             ws.send_json({"type": "AUDIO_END"})
             act2 = _until(ws, lambda item: item.get("type") == "tool" and item.get("name") == "execute_reservation")

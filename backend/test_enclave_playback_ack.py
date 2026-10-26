@@ -24,6 +24,7 @@ def _fixture(session_id="s"):
         "pending_offer": offer,
         "last_user_transcript": "Yes, lock it in",
         "last_user_transcript_server_ts": time.time(),
+        "last_user_speech_started_server_ts": time.time(),
     }
     args = {
         "place_id": "place-1",
@@ -64,13 +65,27 @@ def test_post_playback_affirmative_is_allowed():
     state["pending_offer"]["playback_ack_pending"] = False
     state["pending_offer"]["playback_ack_received"] = True
     state["last_user_transcript"] = "Yes, lock it in"
+    state["last_user_speech_started_server_ts"] = completed_at + 0.005
     state["last_user_transcript_server_ts"] = completed_at + 0.01
     verdict = enclave.intercept(session_id="s3", tool_name="execute_reservation", args=args, state=state)
     assert verdict["verdict"] == "allow"
 
 
+def test_transcript_finishing_after_playback_is_blocked_if_speech_started_before():
+    enclave, state, args = _fixture("s4")
+    completed_at = time.time()
+    state["pending_offer"]["offer_playback_verified"] = True
+    state["pending_offer"]["playback_completed_server_ts"] = completed_at
+    state["last_user_speech_started_server_ts"] = completed_at - 0.01
+    state["last_user_transcript_server_ts"] = completed_at + 0.01
+    verdict = enclave.intercept(session_id="s4", tool_name="execute_reservation", args=args, state=state)
+    assert verdict["verdict"] == "steer"
+    assert verdict["reason"].startswith("PREMATURE_CONFIRMATION_SPEECH")
+
+
 if __name__ == "__main__":
     for test in (test_booking_before_playback_ack_is_steered,
                  test_interrupted_offer_is_steered_even_with_affirmative,
-                 test_post_playback_affirmative_is_allowed):
+                 test_post_playback_affirmative_is_allowed,
+                 test_transcript_finishing_after_playback_is_blocked_if_speech_started_before):
         test()

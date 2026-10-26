@@ -1,5 +1,6 @@
 """Control plane policy, telemetry, and invariant tests. Developed by Sandeep Hipparagi."""
 import asyncio
+import base64
 import threading
 from unittest.mock import patch
 
@@ -71,6 +72,7 @@ def test_audio_and_tool_policy_invariants():
     offer = {"place_id": "p", "restaurant_name": "Cafe", "time_slot": "8", "party_size": 2, "hold_token": "h", "offer_playback_verified": True, "playback_completed_server_ts": 4, "playback_ack_received": True}
     offer["offer_id"] = Enclave.offer_id("s", offer)
     state = {"pending_offer": offer,
+                 "last_user_speech_started_server_ts": 4.5,
              "last_user_transcript_server_ts": 5, "last_user_transcript": "Yes"}
     args = {"place_id": "p", "restaurant_name": "Cafe", "time_slot": "8", "party_size": 2, "hold_token": "h", "user_confirmation_quote": "Yes"}
     assert enc.intercept(session_id="s", tool_name="execute_reservation", args=args, state=state)["verdict"] == "allow"
@@ -139,3 +141,67 @@ def test_barge_in_retires_previous_task_before_new_audio_end():
                     break
             assert transcript == "replacement utterance"
             assert calls == 2
+
+
+def test_websocket_routes_final_transcript_to_agent_and_forwards_sarvam_audio():
+    async def transcribe(_pcm, _sample_rate=16000):
+        return "Find a South Indian restaurant"
+
+    async def respond(state):
+        await state["emit"]({"type": "response", "text": "I found a nearby South Indian restaurant."})
+        await state["emit"]({"type": "audio", "text": "I found a nearby South Indian restaurant.",
+                              "audio": base64.b64encode(b"RIFF-test-audio").decode()})
+        return state
+
+    with patch.object(main.sarvam, "transcribe", transcribe), patch.object(main.harness, "run_turn", respond):
+        with TestClient(app).websocket_connect("/ws") as ws:
+            ws.receive_json()
+            ws.send_bytes(b"\x01\x00" * 320)
+            ws.send_json({"type": "AUDIO_END"})
+            seen = set()
+            for _ in range(30):
+                item = ws.receive_json()
+                if item.get("type") == "transcript":
+                    assert item["text"] == "Find a South Indian restaurant"
+                    seen.add("transcript")
+                elif item.get("type") == "response":
+                    assert "nearby South Indian restaurant" in item["text"]
+                    seen.add("response")
+                elif item.get("type") == "audio":
+                    assert base64.b64decode(item["audio"]) == b"RIFF-test-audio"
+                    seen.add("audio")
+                if seen == {"transcript", "response", "audio"}:
+                    break
+            assert seen == {"transcript", "response", "audio"}
+
+
+def test_agent_failure_still_returns_safe_text_and_sarvam_audio():
+    async def transcribe(_pcm, _sample_rate=16000):
+        return "Find a restaurant"
+
+    async def fail_turn(_state):
+        raise RuntimeError("simulated enclave failure")
+
+    async def synthesize(_text):
+        return b"RIFF-safe-fallback"
+
+    with patch.object(main.sarvam, "transcribe", transcribe), \
+         patch.object(main.sarvam, "synthesize", synthesize), \
+         patch.object(main.harness, "run_turn", fail_turn):
+        with TestClient(app).websocket_connect("/ws") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "USER_SPEAKING_START"})
+            ws.send_bytes(b"\x01\x00" * 320)
+            ws.send_json({"type": "AUDIO_END"})
+            seen = set()
+            for _ in range(30):
+                item = ws.receive_json()
+                if item.get("type") == "response":
+                    assert "safely finish" in item["text"]
+                    seen.add("response")
+                elif item.get("type") == "audio":
+                    assert base64.b64decode(item["audio"]) == b"RIFF-safe-fallback"
+                    seen.add("audio")
+                if seen == {"response", "audio"}:
+                    break
+            assert seen == {"response", "audio"}

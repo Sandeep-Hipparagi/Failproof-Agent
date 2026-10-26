@@ -70,8 +70,12 @@ class Enclave:
                 return self._steer("AUDIO_PLAYBACK_UNVERIFIED: User interrupted or has not heard the complete reservation terms.",
                                    "The user has not heard the complete reservation offer audio yet (playback was incomplete or interrupted). Do NOT call execute_reservation. Repeat the restaurant name, party size, and time slot clearly and wait for the user to confirm after you finish speaking.")
             completed_ts = offer["playback_completed_server_ts"]
+            speech_started_ts = state.get("last_user_speech_started_server_ts")
+            if speech_started_ts is None or speech_started_ts <= completed_ts:
+                return self._steer("PREMATURE_CONFIRMATION_SPEECH: User speech began before complete offer playback.",
+                                   "The user's confirmation began before the complete reservation offer finished. Repeat the restaurant name, party size, and time slot, finish speaking, then wait for a new verbal confirmation.")
             transcript_ts = state.get("last_user_transcript_server_ts")
-            if transcript_ts is None or transcript_ts <= completed_ts:
+            if transcript_ts is None or transcript_ts <= completed_ts or transcript_ts < speech_started_ts:
                 return self._steer("STALE_CONFIRMATION_TIMESTAMP: Confirmation transcript did not arrive after full offer playback.",
                                    "The confirmation arrived before verified offer playback completed. Repeat the complete offer and wait for a new spoken confirmation after playback.")
             transcript = str(state.get("last_user_transcript", ""))
