@@ -5,45 +5,123 @@
   <meta charset="utf-8">
   <meta name="author" content="Sandeep Hipparagi">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#07090e">
+  <meta name="theme-color" content="#07090e" id="metaThemeColor">
   <title>Failproof | Voice Concierge</title>
+  <script>try{const t=localStorage.getItem('failproof.theme')||'dark';document.documentElement.dataset.theme=t}catch(e){}</script>
   <style>
-    :root{color-scheme:dark;--bg:#07090e;--ink:#f4f6fb;--muted:#8f9bae;--line:#ffffff18;--glass:#111722bb;--accent:#8596ff;font:15px/1.45 Inter,"Segoe UI",system-ui,sans-serif}
+    :root{
+      color-scheme:dark;
+      --bg:#07090e;
+      --ink:#f4f6fb;
+      --muted:#8f9bae;
+      --line:#ffffff18;
+      --line-hover:#ffffff45;
+      --glass:#111722bb;
+      --accent:#8596ff;
+      --topbar-btn-bg:#11172299;
+      --topbar-btn-hover:#1a2230;
+      --topbar-btn-color:#dce2ee;
+      --topbar-shadow:0 4px 18px #00000030;
+      --drawer-bg:#0d121bef;
+      --drawer-tabs-bg:#080b11;
+      --drawer-tab-active:#202938;
+      --drawer-tab-active-color:#f3f5fa;
+      --drawer-shadow:-30px 0 100px #0008;
+      --drawer-scrim:#03050ab8;
+      --card-bg:#ffffff06;
+      --card-border:#ffffff12;
+      --card-head-color:#e4e9f2;
+      --caption-color:#c5ccda;
+      --subcaption-color:#6d788a;
+      --brand-color:#79859a;
+      --dock-shadow:0 12px 40px #0004;
+      --pill-val-color:#e6eaf2;
+      --hash-pill-bg:#151c27;
+      font:15px/1.45 Inter,"Segoe UI",system-ui,sans-serif;
+    }
+    [data-theme="light"]{
+      color-scheme:light;
+      --bg:#f6f8fc;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:#00000014;
+      --line-hover:#00000030;
+      --glass:#ffffffdd;
+      --accent:#4361ee;
+      --topbar-btn-bg:#ffffffd9;
+      --topbar-btn-hover:#e8edf5;
+      --topbar-btn-color:#1e293b;
+      --topbar-shadow:0 4px 18px #0f172a12;
+      --drawer-bg:#fffffffa;
+      --drawer-tabs-bg:#eef2f7;
+      --drawer-tab-active:#ffffff;
+      --drawer-tab-active-color:#0f172a;
+      --drawer-shadow:-20px 0 60px #0f172a22;
+      --drawer-scrim:#0f172a44;
+      --card-bg:#00000005;
+      --card-border:#00000010;
+      --card-head-color:#1e293b;
+      --caption-color:#1e293b;
+      --subcaption-color:#64748b;
+      --brand-color:#64748b;
+      --dock-shadow:0 12px 32px #0f172a14;
+      --pill-val-color:#0f172a;
+      --hash-pill-bg:#eef2f7;
+    }
     *{box-sizing:border-box}body{margin:0;min-height:100svh;overflow:hidden;color:var(--ink);background:var(--bg);display:grid;place-items:center;transition:background-color .4s}
     body:before,body:after{content:"";position:fixed;inset:-35%;z-index:-1;pointer-events:none;filter:blur(40px);will-change:transform,opacity;transition:background .7s}
     body:before{background:radial-gradient(ellipse at 50% 44%,color-mix(in srgb,var(--accent) 22%,transparent),transparent 40%),radial-gradient(ellipse at 18% 78%,#4530a51c,transparent 32%);animation:mesh 16s ease-in-out infinite alternate}
     body:after{background:radial-gradient(ellipse at 82% 15%,color-mix(in srgb,var(--accent) 12%,transparent),transparent 32%);animation:mesh 22s ease-in-out infinite alternate-reverse}
+    [data-theme="light"] body:before{background:radial-gradient(ellipse at 50% 44%,color-mix(in srgb,var(--accent) 18%,transparent),transparent 44%),radial-gradient(ellipse at 18% 78%,#4f46e512,transparent 36%)}
+    [data-theme="light"] body:after{background:radial-gradient(ellipse at 82% 15%,color-mix(in srgb,var(--accent) 14%,transparent),transparent 36%)}
     body[data-state="listening"]{--accent:#28d9ec}body[data-state="tools"]{--accent:#47df9c}body[data-state="steer"]{--accent:#ffad55}body[data-state="speaking"]{--accent:#d29aff}
     @keyframes mesh{to{transform:translate3d(3%,2%,0) scale(1.06)}}
-    .topbar{position:fixed;right:clamp(18px,4vw,54px);top:clamp(18px,4vw,42px)}.drawer-toggle{border:1px solid var(--line);border-radius:999px;background:#11172299;color:#dce2ee;padding:11px 16px;backdrop-filter:blur(16px);cursor:pointer;font:600 11px/1.2 Inter,"Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}.drawer-toggle:hover{border-color:#ffffff45;background:#1a2230}
-    main{width:min(940px,94vw);min-height:100svh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:72px 20px 130px;text-align:center}.brand{color:#79859a;text-transform:uppercase;letter-spacing:.22em;font:500 10px/1.2 "JetBrains Mono",Consolas,monospace;margin-bottom:26px}
+    .topbar{position:fixed;right:clamp(18px,4vw,54px);top:clamp(18px,4vw,42px);display:flex;align-items:center;gap:10px;z-index:4}
+    .theme-toggle,.drawer-toggle{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;background:var(--topbar-btn-bg);color:var(--topbar-btn-color);padding:11px 16px;backdrop-filter:blur(16px);cursor:pointer;font:600 11px/1.2 Inter,"Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;transition:all .2s ease;box-shadow:var(--topbar-shadow);user-select:none}
+    .theme-toggle:hover,.drawer-toggle:hover{border-color:var(--line-hover);background:var(--topbar-btn-hover)}
+    .theme-toggle:active,.drawer-toggle:active{transform:scale(.98)}
+    .theme-icon{font-size:12px;line-height:1;display:inline-block;transition:transform .3s ease}
+    .theme-toggle:hover .theme-icon{transform:rotate(18deg) scale(1.1)}
+    main{width:min(940px,94vw);min-height:100svh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:72px 20px 130px;text-align:center}.brand{color:var(--brand-color);text-transform:uppercase;letter-spacing:.22em;font:500 10px/1.2 "JetBrains Mono",Consolas,monospace;margin-bottom:26px}
     .orb-button{width:min(56vw,340px);height:min(56vw,340px);min-width:238px;min-height:238px;border:0;border-radius:50%;padding:0;position:relative;background:transparent;cursor:pointer;outline:none;touch-action:none}
     .orb-button:before,.orb-button:after{content:"";position:absolute;inset:8%;border-radius:50%;border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);box-shadow:0 0 48px color-mix(in srgb,var(--accent) 18%,transparent),inset 0 0 48px color-mix(in srgb,var(--accent) 9%,transparent);animation:ring 6s ease-in-out infinite}
     .orb-button:after{inset:0;border-color:color-mix(in srgb,var(--accent) 17%,transparent);animation-delay:-3s;animation-duration:8s}
     @keyframes ring{50%{transform:scale(1.045);opacity:.5}}
     #voiceOrb{position:absolute;inset:12%;width:76%;height:76%;border-radius:50%;background:radial-gradient(circle at 34% 27%,#394457,#141923 48%,#0b0e14 78%);box-shadow:inset 0 2px 2px #ffffff25,0 20px 90px #0009;z-index:1;display:block}
+    [data-theme="light"] #voiceOrb{background:radial-gradient(circle at 34% 27%,#cbd5e1,#94a3b8 55%,#64748b 90%);box-shadow:inset 0 2px 2px #ffffff90,0 20px 60px #0f172a20}
     .orb-button:hover{filter:brightness(1.12)}.orb-button:active{transform:scale(.985)}.orb-button:focus-visible{outline:2px solid var(--accent);outline-offset:12px}
-    .caption{height:22px;margin:28px 0 0;color:#c5ccda;font:500 12px/1.4 "JetBrains Mono",Consolas,monospace;letter-spacing:.12em;text-transform:uppercase}.subcaption{margin:6px 0 0;color:#6d788a;font-size:11px;line-height:1.4;max-width:min(680px,90vw);min-height:16px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .caption{height:22px;margin:28px 0 0;color:var(--caption-color);font:500 12px/1.4 "JetBrains Mono",Consolas,monospace;letter-spacing:.12em;text-transform:uppercase}.subcaption{margin:6px 0 0;color:var(--subcaption-color);font-size:11px;line-height:1.4;max-width:min(680px,90vw);min-height:16px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
     .dock{position:fixed;left:50%;bottom:clamp(20px,4vh,38px);transform:translateX(-50%);width:min(860px,94vw);display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-    .pill{height:52px;min-width:0;display:flex;align-items:center;gap:10px;padding:0 16px;border:1px solid var(--line);border-radius:16px;background:var(--glass);backdrop-filter:blur(22px);box-shadow:0 12px 40px #0004;text-align:left;overflow:hidden}
-    .dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}.pill-label{flex:none;color:#778398;font:500 9px/1.2 "JetBrains Mono",Consolas,monospace;letter-spacing:.09em;text-transform:uppercase}.pill-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6eaf2;font-size:11px;font-weight:600}.pill[data-tone="good"] .dot{background:#48dfa0;box-shadow:0 0 12px #48dfa0}.pill[data-tone="warn"] .dot{background:#ffb04e;box-shadow:0 0 12px #ffb04e}.worm-badge{margin-left:auto;flex:none;color:#8290a4;font:10px "JetBrains Mono",Consolas,monospace}
-    .drawer-scrim{position:fixed;inset:0;background:#03050ab8;backdrop-filter:blur(5px);opacity:0;visibility:hidden;transition:.25s;z-index:5}.drawer-scrim.open{opacity:1;visibility:visible}.drawer{position:fixed;z-index:6;right:0;top:0;height:100svh;width:min(470px,94vw);padding:24px;display:flex;flex-direction:column;background:#0d121beF;border-left:1px solid var(--line);box-shadow:-30px 0 100px #0008;transform:translateX(102%);transition:transform .3s cubic-bezier(.2,.8,.2,1);backdrop-filter:blur(28px)}.drawer.open{transform:translateX(0)}
-    .drawer-head{display:flex;align-items:center;justify-content:space-between}.drawer-title{font-size:14px;font-weight:650;letter-spacing:.02em}.close{width:34px;height:34px;border:1px solid var(--line);border-radius:50%;color:#aab4c4;background:#151c28;cursor:pointer;font-size:18px}.tabs{display:flex;gap:5px;padding:4px;margin:24px 0 18px;border:1px solid var(--line);border-radius:12px;background:#080b11}.tab{flex:1;border:0;border-radius:8px;padding:9px 6px;background:transparent;color:#8190a4;font:600 10px/1.2 Inter,"Segoe UI",system-ui,sans-serif;cursor:pointer}.tab.active{background:#202938;color:#f3f5fa}.panel-content{overflow:auto;padding:0 2px 10px}.section-title{margin:0 0 12px;color:#758196;font:600 10px "JetBrains Mono",Consolas,monospace;letter-spacing:.12em;text-transform:uppercase}.metric-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.metric,.row{border:1px solid #ffffff12;border-radius:12px;background:#ffffff06;padding:12px}.metric span{display:block;color:#778398;font-size:10px}.metric b{display:block;margin-top:4px;color:#e8edf7;font:600 16px "JetBrains Mono",Consolas,monospace}.list{display:grid;gap:8px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:14px;color:#9ba7b9;font-size:11px}.row b{color:#e4e9f2;font-weight:600}.row .ok{color:#58dda0}.row .bad{color:#ffb35b}.muted{color:#778398;font-size:11px;padding:16px 2px}.waterfall{display:grid;gap:10px}.stage{display:grid;grid-template-columns:minmax(112px,1fr) 2fr 48px;gap:10px;align-items:center;color:#aab4c3;font-size:10px}.bar{height:4px;border-radius:99px;background:#202a38;overflow:hidden}.bar i{height:100%;display:block;background:linear-gradient(90deg,#47dba0,#8cbaff);border-radius:99px}.drawer-footer{margin-top:auto;padding-top:12px;color:#697588;font:9px "JetBrains Mono",Consolas,monospace;letter-spacing:.06em}
+    .pill{height:52px;min-width:0;display:flex;align-items:center;gap:10px;padding:0 16px;border:1px solid var(--line);border-radius:16px;background:var(--glass);backdrop-filter:blur(22px);box-shadow:var(--dock-shadow);text-align:left;overflow:hidden}
+    .dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}.pill-label{flex:none;color:var(--muted);font:500 9px/1.2 "JetBrains Mono",Consolas,monospace;letter-spacing:.09em;text-transform:uppercase}.pill-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pill-val-color);font-size:11px;font-weight:600}.pill[data-tone="good"] .dot{background:#48dfa0;box-shadow:0 0 12px #48dfa0}.pill[data-tone="warn"] .dot{background:#ffb04e;box-shadow:0 0 12px #ffb04e}.worm-badge{margin-left:auto;flex:none;color:var(--muted);font:10px "JetBrains Mono",Consolas,monospace}
+    .drawer-scrim{position:fixed;inset:0;background:var(--drawer-scrim);backdrop-filter:blur(5px);opacity:0;visibility:hidden;transition:.25s;z-index:5}.drawer-scrim.open{opacity:1;visibility:visible}.drawer{position:fixed;z-index:6;right:0;top:0;height:100svh;width:min(470px,94vw);padding:24px;display:flex;flex-direction:column;background:var(--drawer-bg);border-left:1px solid var(--line);box-shadow:var(--drawer-shadow);transform:translateX(102%);transition:transform .3s cubic-bezier(.2,.8,.2,1);backdrop-filter:blur(28px)}.drawer.open{transform:translateX(0)}
+    .drawer-head{display:flex;align-items:center;justify-content:space-between}.drawer-title{font-size:14px;font-weight:650;letter-spacing:.02em;color:var(--ink)}.close{width:34px;height:34px;border:1px solid var(--line);border-radius:50%;color:var(--muted);background:var(--card-bg);cursor:pointer;font-size:18px}.tabs{display:flex;gap:5px;padding:4px;margin:24px 0 18px;border:1px solid var(--line);border-radius:12px;background:var(--drawer-tabs-bg)}.tab{flex:1;border:0;border-radius:8px;padding:9px 6px;background:transparent;color:var(--muted);font:600 10px/1.2 Inter,"Segoe UI",system-ui,sans-serif;cursor:pointer}.tab.active{background:var(--drawer-tab-active);color:var(--drawer-tab-active-color);box-shadow:0 2px 8px #00000010}.panel-content{overflow:auto;padding:0 2px 10px}.section-title{margin:0 0 12px;color:var(--muted);font:600 10px "JetBrains Mono",Consolas,monospace;letter-spacing:.12em;text-transform:uppercase}.metric-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.metric,.row{border:1px solid var(--card-border);border-radius:12px;background:var(--card-bg);padding:12px}.metric span{display:block;color:var(--muted);font-size:10px}.metric b{display:block;margin-top:4px;color:var(--ink);font:600 16px "JetBrains Mono",Consolas,monospace}.list{display:grid;gap:8px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--muted);font-size:11px}.row b{color:var(--card-head-color);font-weight:600}.row .ok{color:#58dda0}.row .bad{color:#ffb35b}.muted{color:var(--muted);font-size:11px;padding:16px 2px}.waterfall{display:grid;gap:10px}.stage{display:grid;grid-template-columns:minmax(112px,1fr) 2fr 48px;gap:10px;align-items:center;color:var(--muted);font-size:10px}.bar{height:4px;border-radius:99px;background:var(--drawer-tabs-bg);overflow:hidden}.bar i{height:100%;display:block;background:linear-gradient(90deg,#47dba0,#8cbaff);border-radius:99px}.drawer-footer{margin-top:auto;padding-top:12px;color:var(--muted);font:9px "JetBrains Mono",Consolas,monospace;letter-spacing:.06em}
     .badge{padding:2px 7px;border-radius:6px;font:700 9px "JetBrains Mono",monospace;letter-spacing:.06em;text-transform:uppercase}
     .badge-allow{background:#113824;color:#52e39e;border:1px solid #52e39e33}
     .badge-steer{background:#382910;color:#ffb759;border:1px solid #ffb75933}
     .badge-break-loop,.badge-deny{background:#381318;color:#ff6e7e;border:1px solid #ff6e7e33}
-    .activity-card{display:grid;gap:6px;border:1px solid #ffffff12;border-radius:12px;background:#ffffff06;padding:11px 13px;font-size:11px}
+    [data-theme="light"] .badge-allow{background:#e6f9f0;color:#0d824d;border:1px solid #0d824d33}
+    [data-theme="light"] .badge-steer{background:#fff8ec;color:#b46200;border:1px solid #b4620033}
+    [data-theme="light"] .badge-break-loop,[data-theme="light"] .badge-deny{background:#fdf2f2;color:#d92d20;border:1px solid #d92d2033}
+    [data-theme="light"] .bar{background:#e2e8f0}
+    [data-theme="light"] .bar i{background:linear-gradient(90deg,#10b981,#3b82f6)}
+    .activity-card{display:grid;gap:6px;border:1px solid var(--card-border);border-radius:12px;background:var(--card-bg);padding:11px 13px;font-size:11px}
     .activity-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .activity-meta{display:flex;align-items:center;gap:6px;color:#78869b;font-size:10px;font-family:"JetBrains Mono",monospace}
-    .activity-reason{color:#c5cfdd;font-size:11px;line-height:1.4}
-    .hash-pill{font-family:"JetBrains Mono",monospace;font-size:9px;color:#8594ab;background:#151c27;padding:2px 5px;border-radius:4px;border:1px solid #ffffff0a}
-    @media(max-width:650px){main{padding-bottom:180px}.dock{grid-template-columns:1fr;bottom:14px;gap:6px;width:min(440px,92vw)}.pill{height:42px;border-radius:13px}.orb-button{min-width:218px;min-height:218px}.brand{margin-bottom:16px}.caption{margin-top:20px}.drawer{padding:18px}}
+    .activity-meta{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10px;font-family:"JetBrains Mono",monospace}
+    .activity-reason{color:var(--card-head-color);font-size:11px;line-height:1.4}
+    .hash-pill{font-family:"JetBrains Mono",monospace;font-size:9px;color:var(--muted);background:var(--hash-pill-bg);padding:2px 5px;border-radius:4px;border:1px solid var(--line)}
+    @media(max-width:650px){main{padding-bottom:180px}.dock{grid-template-columns:1fr;bottom:14px;gap:6px;width:min(440px,92vw)}.pill{height:42px;border-radius:13px}.orb-button{min-width:218px;min-height:218px}.brand{margin-bottom:16px}.caption{margin-top:20px}.drawer{padding:18px}.topbar{gap:6px;right:14px;top:14px}.theme-toggle,.drawer-toggle{padding:8px 12px;font-size:10px;gap:5px}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
   </style>
 </head>
 <body data-state="idle">
-  <div class="topbar"><button class="drawer-toggle" id="drawerToggle">Enclave Control Plane</button></div>
+  <div class="topbar">
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to light mode" title="Switch to light mode">
+      <span class="theme-icon" id="themeIcon">☀️</span>
+      <span id="themeText">Light Mode</span>
+    </button>
+    <button class="drawer-toggle" id="drawerToggle" type="button">Enclave Control Plane</button>
+  </div>
   <main>
     <div class="brand">Failproof · Voice Concierge</div>
     <button class="orb-button" id="voiceButton" aria-label="Hold to speak"><canvas id="voiceOrb" aria-hidden="true"></canvas></button>
@@ -66,6 +144,40 @@
 (() => {
   const $ = (selector) => document.querySelector(selector);
   const body = document.body, button = $('#voiceButton'), canvas = $('#voiceOrb');
+  // Option A: Single Toggle Button (Dark / Light Theme)
+  const themeToggle = $('#themeToggle'), themeIcon = $('#themeIcon'), themeText = $('#themeText'), metaThemeColor = $('#metaThemeColor');
+  function applyTheme(theme, save=true){
+    const isLight = theme === 'light';
+    const effective = isLight ? 'light' : 'dark';
+    document.documentElement.dataset.theme = effective;
+    body.dataset.theme = effective;
+    if(metaThemeColor) metaThemeColor.content = isLight ? '#f6f8fc' : '#07090e';
+    if(themeIcon && themeText){
+      if(isLight){
+        themeIcon.textContent = '🌙';
+        themeText.textContent = 'Dark Mode';
+        themeToggle.setAttribute('aria-label', 'Switch to dark mode');
+        themeToggle.setAttribute('title', 'Switch to dark mode');
+      }else{
+        themeIcon.textContent = '☀️';
+        themeText.textContent = 'Light Mode';
+        themeToggle.setAttribute('aria-label', 'Switch to light mode');
+        themeToggle.setAttribute('title', 'Switch to light mode');
+      }
+    }
+    if(save){
+      try{ localStorage.setItem('failproof.theme', effective); }catch{}
+    }
+  }
+  let initialTheme = 'dark';
+  try{ initialTheme = localStorage.getItem('failproof.theme') || 'dark'; }catch{}
+  applyTheme(initialTheme, false);
+  if(themeToggle){
+    themeToggle.onclick = () => {
+      const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+      applyTheme(current === 'dark' ? 'light' : 'dark', true);
+    };
+  }
   let userId; try { userId=localStorage.getItem('failproof.user_id')||crypto.randomUUID(); localStorage.setItem('failproof.user_id',userId) } catch { userId=crypto.randomUUID() }
   const caption = $('#caption'), drawer = $('#drawer'), scrim = $('#scrim'), panel = $('#panelContent');
   let ws, audioContext, audioContextIdleTimer=null, responseTimer=null, stream, source, processor, micAnalyser, ttsAnalyser, currentAudio, currentAudioUrl = null, currentMediaSource = null, currentAudioOfferId = null, playbackAckToken = null, offerId = null, playbackAckTs = null, transcriptTs = null;
@@ -98,9 +210,9 @@
   const escapeHtml=(value)=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   async function get(url){const response=await fetch(url);if(!response.ok)throw new Error(`${response.status}`);return response.json()}
   async function renderTab(tab){activeTab=tab;const request=++renderGeneration;const isCurrent=()=>request===renderGeneration&&activeTab===tab&&drawer.classList.contains('open');document.querySelectorAll('.tab').forEach(node=>node.classList.toggle('active',node.dataset.tab===tab));panel.innerHTML='<div class="muted">Loading live telemetry…</div>';try{let data;if(tab==='Home'){data=await get('/api/home/overview');if(!isCurrent())return;panel.innerHTML=`<div class="metric-grid">${[['Voice turns',data.voice_turns],['Live sessions',data.active_sessions],['Interception saves',data.interception_saves],['Avg. voice latency',`${(data.avg_voice_latency_seconds*1000).toFixed(0)} ms`],['Active policies',data.policies_deployed],['Graphiti',data.graphiti_status],['Ledger height',data.ledger_block_height],['Ledger integrity',data.ledger_integrity_verified?'Verified':'Failed']].map(([k,v])=>`<div class="metric"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join('')}</div>`}
-      if(tab==='Fix'){const [policies,activity,verify]=await Promise.all([get('/api/fix/overview-policies'),get('/api/fix/activity'),get('/api/fix/activity/verify')]);if(!isCurrent())return;panel.innerHTML=`<h3 class="section-title">Policies · ledger ${verify.integrity_verified?'verified ✓':'tamper detected !'}</h3><div class="list">${policies.policies.map(p=>`<div class="row"><b>${escapeHtml(p.id)}</b><span>${escapeHtml(p.state)} · ${escapeHtml(p.hits)} hits</span></div>`).join('')}</div><h3 class="section-title" style="margin-top:16px;">Policies Fired & Ledger Activity</h3><div class="list">${activity.activity&&activity.activity.length?activity.activity.slice(-8).reverse().map(a=>{const v=(a.verdict||'').toUpperCase();const badgeClass=v==='ALLOW'?'badge-allow':v==='STEER'?'badge-steer':'badge-break-loop';const hashSnippet=(a.entry_hash||a.hash||'').slice(0,8);const hashEnd=(a.entry_hash||a.hash||'').slice(-6);const reason=a.trigger_reason||a.reason||a.reason_code||'Policy checks passed';const timeStr=a.timestamp_utc?new Date(a.timestamp_utc).toLocaleTimeString():(a.timestamp?new Date(a.timestamp*1000).toLocaleTimeString():'');return `<div class="activity-card"><div class="activity-head"><div style="display:flex;align-items:center;gap:8px;"><span class="badge ${badgeClass}">${escapeHtml(v)}</span><b style="color:#e4e9f2;font-size:11px;">${escapeHtml(a.policy_id||'policy_enclave')}</b></div><div class="activity-meta"><span>#${String(a.index??'').padStart(4,'0')}</span><span>${escapeHtml(timeStr)}</span></div></div><div class="activity-reason">${escapeHtml(reason)}</div><div class="activity-meta"><span class="hash-pill">hash:${escapeHtml(hashSnippet)}...${escapeHtml(hashEnd)}</span><span>tool:${escapeHtml(a.tool_name||'execute')}</span></div></div>`}).join(''):'<div class="muted">No policies fired yet. Speak to initiate a reservation.</div>'}</div>`}
-      if(tab==='Trace'){data=await get('/api/trace/overview');if(!isCurrent())return;const stages=(data.sessions||[]).flatMap(s=>s.stages||[]).slice(-8);const max=Math.max(1,...stages.map(s=>s.duration_seconds));const recentEvents=(stageItems.length?stageItems:(data.events||[]).slice().reverse()).slice(0,8);panel.innerHTML=`<h3 class="section-title">Recent execution waterfall</h3>${stages.length?`<div class="waterfall">${stages.map(s=>`<div class="stage"><span>${escapeHtml(s.stage.replaceAll('_',' '))}</span><div class="bar"><i style="width:${Math.max(3,s.duration_seconds/max*100)}%"></i></div><span>${(s.duration_seconds*1000).toFixed(0)}ms</span></div>`).join('')}</div>`:'<div class="muted">Stage timings appear after a voice turn.</div>'}<h3 class="section-title" style="margin-top:16px;">Live Events Stream (/api/trace/live-events)</h3><div class="list">${recentEvents.length?recentEvents.map(e=>{const timeStr=e.timestamp_utc?new Date(e.timestamp_utc).toLocaleTimeString():(e.server_ts?new Date(e.server_ts*1000).toLocaleTimeString():'');const sess=e.session_id?e.session_id.slice(0,8):'';const seq=e.sequence_id?`#${e.sequence_id}`:'';return `<div class="row"><div style="display:flex;flex-direction:column;gap:2px;"><b>${escapeHtml(e.type)}</b><span style="font-size:9px;color:#78869b;font-family:'JetBrains Mono',monospace;">${escapeHtml(seq)} · session:${escapeHtml(sess)}</span></div><span>${escapeHtml(timeStr)}</span></div>`}).join(''):'<div class="muted">No events recorded yet.</div>'}</div>`}
-      if(tab==='Analyse'){data=await get('/api/analyse/checks');if(!isCurrent())return;panel.innerHTML=`<div class="metric"><span>Reliability score</span><b>${escapeHtml(data.reliability_score)}%</b></div><h3 class="section-title" style="margin-top:16px;">Running Invariant Audits</h3><div class="list">${Object.entries(data.checks||{}).map(([name,ok])=>`<div class="row"><b>${escapeHtml(name)}</b><span class="${ok?'ok':'bad'}">${ok?'PASS ✓':'FAIL ✗'}</span></div>`).join('')}</div><h3 class="section-title" style="margin-top:16px;">Operational Insights & Diagnostics</h3><div class="list">${data.insights&&data.insights.length?data.insights.map(i=>`<div class="row" style="align-items:flex-start;flex-direction:column;gap:4px;"><span style="color:#d8e1ef;font-size:11px;line-height:1.4;">${escapeHtml(i)}</span></div>`).join(''):'<div class="muted">All runtime invariants healthy. No latency spikes or anomalies detected.</div>'}</div>${data.alerts&&data.alerts.length?`<h3 class="section-title" style="margin-top:16px;">Active Alerts</h3><div class="list">${data.alerts.slice(-5).reverse().map(a=>`<div class="row"><b>${escapeHtml(a.severity)} · ${escapeHtml(a.code)}</b><span>${new Date(a.server_ts*1000).toLocaleTimeString()}</span></div>`).join('')}</div>`:''}`}
+      if(tab==='Fix'){const [policies,activity,verify]=await Promise.all([get('/api/fix/overview-policies'),get('/api/fix/activity'),get('/api/fix/activity/verify')]);if(!isCurrent())return;panel.innerHTML=`<h3 class="section-title">Policies · ledger ${verify.integrity_verified?'verified ✓':'tamper detected !'}</h3><div class="list">${policies.policies.map(p=>`<div class="row"><b>${escapeHtml(p.id)}</b><span>${escapeHtml(p.state)} · ${escapeHtml(p.hits)} hits</span></div>`).join('')}</div><h3 class="section-title" style="margin-top:16px;">Policies Fired & Ledger Activity</h3><div class="list">${activity.activity&&activity.activity.length?activity.activity.slice(-8).reverse().map(a=>{const v=(a.verdict||'').toUpperCase();const badgeClass=v==='ALLOW'?'badge-allow':v==='STEER'?'badge-steer':'badge-break-loop';const hashSnippet=(a.entry_hash||a.hash||'').slice(0,8);const hashEnd=(a.entry_hash||a.hash||'').slice(-6);const reason=a.trigger_reason||a.reason||a.reason_code||'Policy checks passed';const timeStr=a.timestamp_utc?new Date(a.timestamp_utc).toLocaleTimeString():(a.timestamp?new Date(a.timestamp*1000).toLocaleTimeString():'');return `<div class="activity-card"><div class="activity-head"><div style="display:flex;align-items:center;gap:8px;"><span class="badge ${badgeClass}">${escapeHtml(v)}</span><b style="color:var(--card-head-color);font-size:11px;">${escapeHtml(a.policy_id||'policy_enclave')}</b></div><div class="activity-meta"><span>#${String(a.index??'').padStart(4,'0')}</span><span>${escapeHtml(timeStr)}</span></div></div><div class="activity-reason">${escapeHtml(reason)}</div><div class="activity-meta"><span class="hash-pill">hash:${escapeHtml(hashSnippet)}...${escapeHtml(hashEnd)}</span><span>tool:${escapeHtml(a.tool_name||'execute')}</span></div></div>`}).join(''):'<div class="muted">No policies fired yet. Speak to initiate a reservation.</div>'}</div>`}
+      if(tab==='Trace'){data=await get('/api/trace/overview');if(!isCurrent())return;const stages=(data.sessions||[]).flatMap(s=>s.stages||[]).slice(-8);const max=Math.max(1,...stages.map(s=>s.duration_seconds));const recentEvents=(stageItems.length?stageItems:(data.events||[]).slice().reverse()).slice(0,8);panel.innerHTML=`<h3 class="section-title">Recent execution waterfall</h3>${stages.length?`<div class="waterfall">${stages.map(s=>`<div class="stage"><span>${escapeHtml(s.stage.replaceAll('_',' '))}</span><div class="bar"><i style="width:${Math.max(3,s.duration_seconds/max*100)}%"></i></div><span>${(s.duration_seconds*1000).toFixed(0)}ms</span></div>`).join('')}</div>`:'<div class="muted">Stage timings appear after a voice turn.</div>'}<h3 class="section-title" style="margin-top:16px;">Live Events Stream (/api/trace/live-events)</h3><div class="list">${recentEvents.length?recentEvents.map(e=>{const timeStr=e.timestamp_utc?new Date(e.timestamp_utc).toLocaleTimeString():(e.server_ts?new Date(e.server_ts*1000).toLocaleTimeString():'');const sess=e.session_id?e.session_id.slice(0,8):'';const seq=e.sequence_id?`#${e.sequence_id}`:'';return `<div class="row"><div style="display:flex;flex-direction:column;gap:2px;"><b>${escapeHtml(e.type)}</b><span style="font-size:9px;color:var(--muted);font-family:'JetBrains Mono',monospace;">${escapeHtml(seq)} · session:${escapeHtml(sess)}</span></div><span>${escapeHtml(timeStr)}</span></div>`}).join(''):'<div class="muted">No events recorded yet.</div>'}</div>`}
+      if(tab==='Analyse'){data=await get('/api/analyse/checks');if(!isCurrent())return;panel.innerHTML=`<div class="metric"><span>Reliability score</span><b>${escapeHtml(data.reliability_score)}%</b></div><h3 class="section-title" style="margin-top:16px;">Running Invariant Audits</h3><div class="list">${Object.entries(data.checks||{}).map(([name,ok])=>`<div class="row"><b>${escapeHtml(name)}</b><span class="${ok?'ok':'bad'}">${ok?'PASS ✓':'FAIL ✗'}</span></div>`).join('')}</div><h3 class="section-title" style="margin-top:16px;">Operational Insights & Diagnostics</h3><div class="list">${data.insights&&data.insights.length?data.insights.map(i=>`<div class="row" style="align-items:flex-start;flex-direction:column;gap:4px;"><span style="color:var(--card-head-color);font-size:11px;line-height:1.4;">${escapeHtml(i)}</span></div>`).join(''):'<div class="muted">All runtime invariants healthy. No latency spikes or anomalies detected.</div>'}</div>${data.alerts&&data.alerts.length?`<h3 class="section-title" style="margin-top:16px;">Active Alerts</h3><div class="list">${data.alerts.slice(-5).reverse().map(a=>`<div class="row"><b>${escapeHtml(a.severity)} · ${escapeHtml(a.code)}</b><span>${new Date(a.server_ts*1000).toLocaleTimeString()}</span></div>`).join('')}</div>`:''}`}
     }catch{if(isCurrent())panel.innerHTML='<div class="muted">Control plane telemetry is temporarily unavailable.</div>'}}
   function openDrawer(){drawer.classList.add('open');scrim.classList.add('open');drawer.setAttribute('aria-hidden','false');renderTab(activeTab)}function closeDrawer(){renderGeneration++;drawer.classList.remove('open');scrim.classList.remove('open');drawer.setAttribute('aria-hidden','true')}
   $('#drawerToggle').onclick=openDrawer;$('#drawerClose').onclick=closeDrawer;scrim.onclick=closeDrawer;document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>renderTab(tab.dataset.tab));button.addEventListener('pointerdown',event=>{event.preventDefault();start().catch(()=>{caption.textContent='Microphone permission required'})});window.addEventListener('pointerup',end);window.addEventListener('pointercancel',end);window.addEventListener('keydown',event=>{if(event.code==='Space'&&!event.repeat){event.preventDefault();start().catch(()=>{})}});window.addEventListener('keyup',event=>{if(event.code==='Space')end()});window.addEventListener('resize',resizeCanvas);resizeCanvas();animateOrb();connect();
