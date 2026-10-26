@@ -47,7 +47,12 @@ def test_gemini_tool_schema_preserves_float_integer_and_list_types():
 def test_google_genai_tool_declarations_and_responses_match_installed_sdk():
     import pytest
     pytest.importorskip("google.genai")
-    from backend.agent_harness import _function_declaration, _function_response_content
+    from google.genai import types
+    from backend.agent_harness import (
+        _function_declaration,
+        _function_response_content,
+        _normalize_gemini_contents,
+    )
 
     declaration = _function_declaration("discover_nearby_restaurants", discover_nearby_restaurants)
     response = _function_response_content([
@@ -56,3 +61,11 @@ def test_google_genai_tool_declarations_and_responses_match_installed_sdk():
     assert declaration.parameters.properties["lat"].type.name == "NUMBER"
     assert response.role == "tool"
     assert response.parts[0].function_response.name == "discover_nearby_restaurants"
+
+    history = _normalize_gemini_contents(["Find a restaurant", response], types)
+    request = types._GenerateContentParameters.model_validate({
+        "model": "gemini-2.5-flash",
+        "contents": history,
+    })
+    assert request.contents[0].role == "user"
+    assert request.contents[0].parts[0].text == "Find a restaurant"

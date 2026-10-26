@@ -95,7 +95,9 @@ class AgentHarness:
             relationships = state["memory"].get("relationships", {})
             if state["session_id"] in cp.sessions:
                 cp.sessions[state["session_id"]]["dietary_constraints"] = relationships.get("DIETARY_RESTRICTION", [])
-        state.setdefault("messages", []).append({"role": "user", "content": state.get("last_user_transcript", "")})
+        # Keep turns as strings internally; normalize them to Gemini Content at
+        # the SDK boundary so no OpenAI-style `content` dictionaries leak in.
+        state.setdefault("messages", []).append(state.get("last_user_transcript", ""))
         state.setdefault("candidate_restaurants", [])
         state.setdefault("pending_reservation", None)
         state.setdefault("voice_approval_verified", False)
@@ -110,7 +112,7 @@ class AgentHarness:
         from google.genai import types
         declarations = [_function_declaration(name, fn) for name, fn in TOOL_FUNCTIONS.items()]
         config = types.GenerateContentConfig(system_instruction=_system_prompt(state), tools=[types.Tool(function_declarations=declarations)], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), thinking_config=types.ThinkingConfig(thinking_budget=0))
-        contents = state["messages"][-12:]
+        contents = _normalize_gemini_contents(state["messages"][-12:], types)
         started = time.perf_counter()
         logger.info("\033[96m[LLM-REASON]\033[0m request session=%s model=%s message_count=%d", state.get("session_id"), self.model, len(contents))
         try:
@@ -329,6 +331,15 @@ def _function_response_content(entries: list[dict[str, Any]]):
         part_args = {"name": entry["name"], "response": entry["response"]}
         parts.append(types.Part.from_function_response(**part_args))
     return types.Content(role="tool", parts=parts)
+
+
+def _normalize_gemini_contents(messages: list[Any], types) -> list[Any]:
+    """Convert internal user strings to the SDK's supported Content shape."""
+    return [
+        types.Content(role="user", parts=[types.Part(text=message)])
+        if isinstance(message, str) else message
+        for message in messages
+    ]
 
 def _offer_sentence(state, args):
     offer = state.get("reservation_offer", {})
