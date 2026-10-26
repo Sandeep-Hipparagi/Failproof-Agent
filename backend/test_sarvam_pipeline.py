@@ -1,4 +1,4 @@
-﻿"""Sarvam REST wire-contract tests for the voice pipeline. Developed by Sandeep Hipparagi."""
+"""Sarvam REST wire-contract tests for the voice pipeline. Developed by Sandeep Hipparagi."""
 import asyncio
 import base64
 import json
@@ -31,12 +31,12 @@ def test_sarvam_stt_sends_wav_multipart_and_authentication(monkeypatch):
     body = request.content
     assert request.url.path == "/speech-to-text"
     assert request.headers["api-subscription-key"] == "test-key"
-    assert b'name="model"' in body and b"saaras:v3" in body
+    assert b'name="model"' in body and b"saaras:v4" in body
     assert b'name="sampling_rate"' in body and b"16000" in body
     assert b'filename="speech.wav"' in body and b"RIFF" in body
 
 
-def test_sarvam_tts_uses_valid_bulbul_v3_contract(monkeypatch):
+def test_sarvam_tts_uses_valid_bulbul_v4_flash_contract(monkeypatch):
     monkeypatch.setenv("SARVAM_API_KEY", "test-key")
     monkeypatch.setenv("SARVAM_SPEAKER", "roopa_en_conversational")
     captured = {}
@@ -60,8 +60,8 @@ def test_sarvam_tts_uses_valid_bulbul_v3_contract(monkeypatch):
     assert request.url.path == "/text-to-speech"
     assert request.headers["api-subscription-key"] == "test-key"
     assert payload["language_code"] == "en-IN"
-    assert payload["model"] == "bulbul:v3"
-    assert payload["speaker"] == "roopa"
+    assert payload["model"] == "bulbul:v4-flash"
+    assert payload["speaker"] == "simran_en_customer"
     assert payload["speech_sample_rate"] == 16000
     assert payload["output_audio_codec"] == "wav"
     assert "target_language_code" not in payload

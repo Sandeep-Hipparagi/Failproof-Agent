@@ -277,7 +277,7 @@ class AgentHarness:
             started = time.perf_counter()
             audio = await self.sarvam.synthesize(filler_text)
             if audio:
-                if cp: cp.stage(state["session_id"], "sarvam_tts", started, model="bulbul:v3", acoustic_filler=True)
+                if cp: cp.stage(state["session_id"], "sarvam_tts", started, model=getattr(self.sarvam, "tts_model", "bulbul:v4-flash"), acoustic_filler=True)
                 await _emit(state, {"type": "audio", "text": filler_text, "audio": base64.b64encode(audio).decode()})
         except Exception as exc:
             cp = getattr(self.enclave, "control_plane", None)
@@ -293,7 +293,7 @@ class AgentHarness:
             started = time.perf_counter()
             audio = await self.sarvam.synthesize(response)
             cp = getattr(self.enclave, "control_plane", None)
-            if cp: cp.stage(state["session_id"], "sarvam_tts", started, model="bulbul:v3")
+            if cp: cp.stage(state["session_id"], "sarvam_tts", started, model=getattr(self.sarvam, "tts_model", "bulbul:v4-flash"))
             if audio:
                 payload = {"type": "audio", "text": response, "audio": base64.b64encode(audio).decode()}
                 offer = state.get("pending_offer")

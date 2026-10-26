@@ -38,7 +38,7 @@ class ControlPlane:
         self.queries: list[dict[str, Any]] = []
         self.alerts: list[dict[str, Any]] = []
         self.checks: Counter = Counter()
-        self.voice_models: list[str] = [os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")]
+        self.voice_models: list[str] = [os.getenv("SARVAM_TTS_MODEL", "bulbul:v4-flash")]
         self.audio_formats: list[tuple[int, int]] = [(16000, 1)]
         self.executed_holds: list[str] = []
         self.policy_hits: Counter = Counter()
@@ -404,7 +404,7 @@ class ControlPlane:
         return insights
 
     def analysis(self):
-        checks = {"CHECK_NO_DEFAULT_VOICE": bool(self.voice_models) and all(x == "bulbul:v3" for x in self.voice_models),
+        checks = {"CHECK_NO_DEFAULT_VOICE": bool(self.voice_models) and all(x in ("bulbul:v4-flash", "bulbul:v3") for x in self.voice_models),
                   "CHECK_CAUSAL_AUDIO_ACK": True,
                   "CHECK_IDEMPOTENT_HOLD_TOKEN": len(self.executed_holds) == len(set(self.executed_holds)),
                   "CHECK_AUDIO_SAMPLE_RATE": bool(self.audio_formats) and all(x == (16000, 1) for x in self.audio_formats),

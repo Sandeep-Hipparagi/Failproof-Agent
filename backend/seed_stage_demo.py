@@ -140,7 +140,7 @@ def _seed_two_act_story(cp: ControlPlane) -> None:
     }
 
     # Act 1: the client interrupts offer audio. Playback proof is deliberately absent.
-    _stage(cp, "sarvam_stt", model="saaras:v3", sample_rate=16000, channels=1)
+    _stage(cp, "sarvam_stt", model="saaras:v4", sample_rate=16000, channels=1)
     _stage(cp, "graphiti_memory_lookup", fallback=True, source="local-memory")
     _stage(cp, "gemini_reasoning", model="gemini-2.5-flash", thinking_budget=0)
     cp.event(SESSION_ID, "TTS_PLAYBACK_INTERRUPTED", offer_id=offer_id)
@@ -168,7 +168,7 @@ def _seed_two_act_story(cp: ControlPlane) -> None:
     )
     cp.event(SESSION_ID, "ENCLAVE_VERDICT", verdict="STEER", policy_id="policy_booking_voice_approval", reason_code="AUDIO_PLAYBACK_UNVERIFIED")
     cp.snapshot(SESSION_ID, "after", state)
-    _stage(cp, "sarvam_tts", model="bulbul:v3", replay_offer=True)
+    _stage(cp, "sarvam_tts", model="bulbul:v4-flash", replay_offer=True)
 
     # Act 2: use fixed Bengaluru stage timestamps and exactly +420 ms causal delta.
     offer["offer_playback_verified"] = True
@@ -185,7 +185,7 @@ def _seed_two_act_story(cp: ControlPlane) -> None:
     cp.sentiment(SESSION_ID, TRANSCRIPT)
     cp.query(SESSION_ID, "getzep/graphiti", "restaurant preferences", 0.001, fallback=True)
     cp.query(SESSION_ID, "gemini-2.5-flash", '{"tool":"execute_reservation","party_size":2}', 0.001)
-    _stage(cp, "sarvam_stt", model="saaras:v3", sample_rate=16000, channels=1)
+    _stage(cp, "sarvam_stt", model="saaras:v4", sample_rate=16000, channels=1)
     _stage(cp, "graphiti_memory_lookup", fallback=True, source="local-memory")
     _stage(cp, "gemini_reasoning", model="gemini-2.5-flash", thinking_budget=0)
     cp.snapshot(SESSION_ID, "before", state)
@@ -207,7 +207,7 @@ def _seed_two_act_story(cp: ControlPlane) -> None:
     cp.event(SESSION_ID, "ENCLAVE_VERDICT", verdict="ALLOW", policy_id="policy_booking_voice_approval", causal_proof=causal)
     cp.snapshot(SESSION_ID, "after", state)
     _stage(cp, "parallel_tool_execution", tool_name="execute_reservation", result="DEMO_CONFIRMED")
-    _stage(cp, "sarvam_tts", model="bulbul:v3")
+    _stage(cp, "sarvam_tts", model="bulbul:v4-flash")
     _stage(cp, "client_playback_ack", offer_id=offer_id, delta_ms=420)
     enclave.committed(hold_token, SESSION_ID)
     cp.executed_holds.append(hold_token)

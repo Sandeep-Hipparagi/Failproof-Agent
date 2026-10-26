@@ -183,7 +183,7 @@
   let ws, audioContext, audioContextIdleTimer=null, responseTimer=null, stream, source, processor, micAnalyser, ttsAnalyser, currentAudio, currentAudioUrl = null, currentMediaSource = null, currentAudioOfferId = null, playbackAckToken = null, offerId = null, playbackAckTs = null, transcriptTs = null;
   let recording = false, hasVoice = false, bargeInSent = false, bargeSince = 0, verdict = 'ALLOW', metrics = {}, activeOffer = '', stageItems = [], analyserBins = new Uint8Array(0);
   let reconnectTimer = null, reconnectAttempt = 0, pendingPcm = [], pendingAudioEnd = false, pendingUserStart = false, pendingInterruption = false, captureOverflow = false, renderGeneration = 0;
-  const setState = (value) => { body.dataset.state = value; updateOrbState(value); caption.textContent = ({idle:'Ready when you are',listening:'Listening · 16 kHz PCM',tools:'Parallel tools · enclave gate',speaking:'Speaking · Sarvam Bulbul v3',steer:'Voice confirmation required'})[value] || value; };
+  const setState = (value) => { body.dataset.state = value; updateOrbState(value); caption.textContent = ({idle:'Ready when you are',listening:'Listening · 16 kHz PCM',tools:'Parallel tools · enclave gate',speaking:'Speaking · Sarvam Bulbul v4-flash',steer:'Voice confirmation required'})[value] || value; };
   // Visual treatment adapted from weeeha/AI-Orb (MIT): https://github.com/weeeha/AI-Orb
   // A single WebGL pass renders the sphere; live analyser energy and the existing
   // application state are uniforms, so audio frames never trigger DOM work.

@@ -13,17 +13,21 @@ SARVAM_BASE = "https://api.sarvam.ai"
 logger = logging.getLogger(__name__)
 
 LEGACY_SPEAKER_MAP = {
-    "meera": "roopa",
-    "pavithra": "simran",
-    "mahesh": "dev",
-    "roopa_en_conversational": "roopa",
-    "simran_en_conversation": "simran",
-    "dev_en_conversational": "dev",
-    "default": "roopa",
+    "meera": "simran_en_customer",
+    "pavithra": "simran_en_customer",
+    "mahesh": "simran_en_customer",
+    "roopa": "simran_en_customer",
+    "simran": "simran_en_customer",
+    "dev": "simran_en_customer",
+    "roopa_en_conversational": "simran_en_customer",
+    "simran_en_conversation": "simran_en_customer",
+    "dev_en_conversational": "simran_en_customer",
+    "default": "simran_en_customer",
 }
 
 class SarvamClient:
-    tts_model = "bulbul:v3"
+    tts_model = os.getenv("SARVAM_TTS_MODEL", "bulbul:v4-flash")
+    stt_model = os.getenv("SARVAM_STT_MODEL", "saaras:v4")
 
     def __init__(self) -> None:
         self.api_key = os.getenv("SARVAM_API_KEY", "")
@@ -31,8 +35,8 @@ class SarvamClient:
         self._audio_cache: dict[str, bytes] = {}
 
     def _resolve_speaker(self) -> str:
-        speaker = os.getenv("SARVAM_SPEAKER", "roopa").strip()
-        return LEGACY_SPEAKER_MAP.get(speaker.lower(), speaker or "roopa")
+        speaker = os.getenv("SARVAM_SPEAKER", "simran_en_customer").strip()
+        return LEGACY_SPEAKER_MAP.get(speaker.lower(), speaker or "simran_en_customer")
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> str:
         if not self.api_key:
@@ -41,13 +45,18 @@ class SarvamClient:
         if not pcm16 or not any(pcm16):
             logger.warning("\033[93m[STT-IN]\033[0m empty or silent PCM payload; skipping request")
             return ""
-        logger.info("\033[96m[STT-IN]\033[0m submitting wav_bytes=%d sample_rate=%d channels=1 model=saaras:v3", len(pcm16), sample_rate)
+        logger.info("\033[96m[STT-IN]\033[0m submitting wav_bytes=%d sample_rate=%d channels=1 model=%s", len(pcm16), sample_rate, self.stt_model)
         async def request(client):
             async def post():
                 response = await client.post(
                     f"{SARVAM_BASE}/speech-to-text",
                     headers={"api-subscription-key": self.api_key},
-                    data={"model": "saaras:v3", "language_code": "unknown", "sampling_rate": str(sample_rate)},
+                    data={
+                        "model": self.stt_model,
+                        "mode": "transcribe",
+                        "language_code": "unknown",
+                        "sampling_rate": str(sample_rate)
+                    },
                     files={"file": ("speech.wav", _wav(pcm16, sample_rate), "audio/wav")}
                 )
                 if response.is_error:
@@ -84,7 +93,7 @@ class SarvamClient:
                     json={
                         "text": clean_text[:2500],
                         "language_code": "en-IN",
-                        "model": "bulbul:v3",
+                        "model": self.tts_model,
                         "speaker": speaker,
                         "pace": 1.05,
                         "speech_sample_rate": 16000,

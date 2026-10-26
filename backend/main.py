@@ -200,7 +200,7 @@ async def websocket_endpoint(ws: WebSocket):
             started = time.perf_counter()
             control.audio_formats.append((16000, 1))
             transcript = await sarvam.transcribe(pcm, 16000)
-            control.stage(session_id, "sarvam_stt", started, model="saaras:v3", sample_rate=16000, channels=1)
+            control.stage(session_id, "sarvam_stt", started, model=getattr(sarvam, "stt_model", "saaras:v4"), sample_rate=16000, channels=1)
         except Exception as exc:
             logger.exception("\033[91m[STT-IN]\033[0m transcription failed session=%s", session_id)
             control.alert("WARNING", "SARVAM_STT_UNAVAILABLE", session_id, type(exc).__name__)
