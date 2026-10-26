@@ -164,7 +164,16 @@ async def websocket_endpoint(ws: WebSocket):
         session_registry[session_id] = {"state": state, "connected_at": now}
     await ws.send_json({"type": "home_metrics", "metrics": control.metrics()})
     async def emit(item):
-        kinds = {"status": None, "transcript": "STT_FINAL_TRANSCRIPT", "tool_requested": "TOOL_CALL_REQUESTED", "audio": "TTS_CHUNK_STREAMED", "enclave": "ENCLAVE_VERDICT"}
+        kinds = {
+            "status": None,
+            "transcript": "STT_FINAL_TRANSCRIPT",
+            "tool_requested": "TOOL_CALL_REQUESTED",
+            "tool": "TOOL_CALL_COMPLETED",
+            "response": "AGENT_RESPONSE_GENERATED",
+            "audio": "TTS_CHUNK_STREAMED",
+            "enclave": "ENCLAVE_VERDICT",
+            "telemetry": "TELEMETRY_LOG",
+        }
         if kinds.get(item.get("type")):
             live = control.event(session_id, kinds[item["type"]], **{k:v for k,v in item.items() if k not in {"type", "audio", "playback_ack_token"}})
             await ws.send_json({"type": "live_event", "event": live})
