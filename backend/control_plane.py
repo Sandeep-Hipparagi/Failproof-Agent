@@ -60,7 +60,7 @@ class ControlPlane:
         with self._ledger_thread_lock, lock_path.open("a+b") as lock_file:
             lock_file.seek(0, os.SEEK_END)
             if lock_file.tell() == 0:
-                lock_file.write(b"\0")
+                lock_file.write(b"1")
                 lock_file.flush()
             lock_file.seek(0)
             if os.name == "nt":

@@ -64,7 +64,7 @@ def test_google_genai_tool_declarations_and_responses_match_installed_sdk():
 
     history = _normalize_gemini_contents(["Find a restaurant", response], types)
     request = types._GenerateContentParameters.model_validate({
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.5-flash",
         "contents": history,
     })
     assert request.contents[0].role == "user"

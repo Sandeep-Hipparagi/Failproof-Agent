@@ -9,6 +9,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 _circuit_open_until: dict[str, float] = {}
+_failure_counts: dict[str, int] = {}
 
 
 class CircuitOpenError(RuntimeError):
@@ -27,6 +28,7 @@ async def resilient_call(operation: Callable[[], Awaitable[T]], *, timeout: floa
                 result = await operation()
                 if service:
                     _circuit_open_until.pop(service, None)
+                    _failure_counts.pop(service, None)
                 return result
             except asyncio.CancelledError:
                 raise
@@ -36,12 +38,18 @@ async def resilient_call(operation: Callable[[], Awaitable[T]], *, timeout: floa
                     await asyncio.sleep(min(0.35, 0.08 * (2**attempt)) + random.uniform(0, 0.04))
         assert last_error is not None
         if service:
-            _circuit_open_until[service] = time.monotonic() + 10.0
+            count = _failure_counts.get(service, 0) + 1
+            _failure_counts[service] = count
+            if count >= 3:
+                _circuit_open_until[service] = time.monotonic() + 5.0
         raise last_error
 
     try:
         return await asyncio.wait_for(run(), timeout=timeout)
     except asyncio.TimeoutError:
         if service:
-            _circuit_open_until[service] = time.monotonic() + 10.0
+            count = _failure_counts.get(service, 0) + 1
+            _failure_counts[service] = count
+            if count >= 3:
+                _circuit_open_until[service] = time.monotonic() + 5.0
         raise

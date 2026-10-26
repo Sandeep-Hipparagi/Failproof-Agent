@@ -1,5 +1,11 @@
 """Focused async tests for the client playback proof and causal booking gate. Developed by Sandeep Hipparagi."""
+import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from backend.failproof_enclave import Enclave
 
@@ -89,3 +95,4 @@ if __name__ == "__main__":
                  test_post_playback_affirmative_is_allowed,
                  test_transcript_finishing_after_playback_is_blocked_if_speech_started_before):
         test()
+    print("PASS: all enclave playback ack tests passed.")

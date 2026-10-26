@@ -46,7 +46,7 @@ class AgentHarness:
                 raise RuntimeError("GEMINI_API_KEY is not configured")
             from google import genai
             self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            self.model = "gemini-2.5-flash"
+            self.model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
             logger.info("Gemini client configured model=%s", self.model)
         except Exception as exc:
             self.client = None
@@ -114,15 +114,27 @@ class AgentHarness:
         config = types.GenerateContentConfig(system_instruction=_system_prompt(state), tools=[types.Tool(function_declarations=declarations)], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), thinking_config=types.ThinkingConfig(thinking_budget=0))
         contents = _normalize_gemini_contents(state["messages"][-12:], types)
         started = time.perf_counter()
-        logger.info("\033[96m[LLM-REASON]\033[0m request session=%s model=%s message_count=%d", state.get("session_id"), self.model, len(contents))
-        try:
-            async def generate():
-                return await self.client.aio.models.generate_content(model=self.model, contents=contents, config=config)
-            response = await resilient_call(generate, timeout=4.0, attempts=2, service="gemini")
-        except Exception as exc:
+        models_to_try = [self.model]
+        for fallback in ("gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+        response = None
+        last_exc: Exception | None = None
+        for model_name in models_to_try:
+            logger.info("\033[96m[LLM-REASON]\033[0m request session=%s model=%s message_count=%d", state.get("session_id"), model_name, len(contents))
+            try:
+                async def generate():
+                    return await self.client.aio.models.generate_content(model=model_name, contents=contents, config=config)
+                response = await resilient_call(generate, timeout=15.0, attempts=2, service=f"gemini-{model_name}")
+                self.model = model_name
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("\033[93m[LLM-REASON]\033[0m model=%s failed (%s); trying fallback", model_name, type(exc).__name__)
+        if response is None:
             cp = getattr(self.enclave, "control_plane", None)
-            if cp: cp.alert("WARNING", "GEMINI_FALLBACK", state["session_id"], f"Reasoning unavailable ({type(exc).__name__})")
-            logger.exception("\033[91m[LLM-REASON]\033[0m Gemini request failed session=%s", state.get("session_id"))
+            if cp: cp.alert("WARNING", "GEMINI_FALLBACK", state["session_id"], f"Reasoning unavailable ({type(last_exc).__name__})")
+            logger.exception("\033[91m[LLM-REASON]\033[0m all Gemini candidate models failed session=%s error=%s", state.get("session_id"), last_exc)
             state["response"] = "I can't reach the restaurant assistant right now. Please try again in a moment."
             state["pending_calls"] = []
             return state
@@ -146,7 +158,7 @@ class AgentHarness:
                 state["response"] = part.text
         state["pending_calls"] = calls
         logger.info("\033[92m[LLM-REASON]\033[0m response session=%s tool_calls=%d text_chars=%d", state.get("session_id"), len(calls), len(state.get("response", "")))
-        state["messages"].append({"role": "model", "content": response.candidates[0].content})
+        state["messages"].append(response.candidates[0].content)
         return state
 
     async def failproof_policy_gate(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -334,12 +346,34 @@ def _function_response_content(entries: list[dict[str, Any]]):
 
 
 def _normalize_gemini_contents(messages: list[Any], types) -> list[Any]:
-    """Convert internal user strings to the SDK's supported Content shape."""
-    return [
-        types.Content(role="user", parts=[types.Part(text=message)])
-        if isinstance(message, str) else message
-        for message in messages
-    ]
+    """Convert internal messages to SDK-supported Content objects with valid roles."""
+    normalized = []
+    for message in messages:
+        if isinstance(message, str):
+            normalized.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
+        elif isinstance(message, dict):
+            if "content" in message:
+                inner = message["content"]
+                if isinstance(inner, types.Content):
+                    role = "user" if getattr(inner, "role", None) == "tool" else getattr(inner, "role", "user")
+                    normalized.append(types.Content(role=role, parts=inner.parts))
+                elif isinstance(inner, str):
+                    normalized.append(types.Content(role="user" if message.get("role") == "tool" else message.get("role", "user"), parts=[types.Part.from_text(text=inner)]))
+                else:
+                    normalized.append(inner)
+            elif "role" in message and "parts" in message:
+                role = "user" if message["role"] == "tool" else message["role"]
+                normalized.append(types.Content(role=role, parts=message["parts"]))
+            else:
+                normalized.append(message)
+        elif isinstance(message, types.Content):
+            if getattr(message, "role", None) == "tool":
+                normalized.append(types.Content(role="user", parts=message.parts))
+            else:
+                normalized.append(message)
+        else:
+            normalized.append(message)
+    return normalized
 
 def _offer_sentence(state, args):
     offer = state.get("reservation_offer", {})

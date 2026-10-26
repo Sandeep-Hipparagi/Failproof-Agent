@@ -54,11 +54,11 @@ class SarvamClient:
                     logger.error("\033[91m[STT-IN]\033[0m Sarvam HTTP %s: %s", response.status_code, response.text[:300])
                     response.raise_for_status()
                 return response
-            return await resilient_call(post, timeout=4.0, attempts=2, service="sarvam-stt")
+            return await resilient_call(post, timeout=8.0, attempts=2, service="sarvam-stt")
         if self.http_client:
             response = await request(self.http_client)
         else:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await request(client)
         transcript = response.json().get("transcript", "")
         logger.info("\033[92m[STT-IN]\033[0m completed transcript_chars=%d", len(transcript or ""))
@@ -95,11 +95,11 @@ class SarvamClient:
                     logger.error("\033[91m[TTS-OUT]\033[0m Sarvam HTTP %s: %s", response.status_code, response.text[:300])
                     response.raise_for_status()
                 return response
-            return await resilient_call(post, timeout=4.0, attempts=2, service="sarvam-tts")
+            return await resilient_call(post, timeout=8.0, attempts=2, service="sarvam-tts")
         if self.http_client:
             response = await request(self.http_client)
         else:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await request(client)
         payload = response.json()
         audios = payload.get("audios") or []

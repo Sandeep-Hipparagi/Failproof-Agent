@@ -10,35 +10,34 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .control_plane import ControlPlane
-from .failproof_enclave import Enclave
-from .tools.restaurant_tools import (
-    discover_nearby_restaurants,
-    inspect_menu_and_dietary_fit,
-    verify_google_reviews,
-)
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from .control_plane import ControlPlane
+    from .failproof_enclave import Enclave
+    from .tools.restaurant_tools import (
+        discover_nearby_restaurants,
+        inspect_menu_and_dietary_fit,
+        verify_google_reviews,
+    )
+except ImportError:
+    from backend.control_plane import ControlPlane
+    from backend.failproof_enclave import Enclave
+    from backend.tools.restaurant_tools import (
+        discover_nearby_restaurants,
+        inspect_menu_and_dietary_fit,
+        verify_google_reviews,
+    )
 SESSION_ID = "stage-demo-bengaluru-mtr-20261026"
 TRANSCRIPT = "Yes, confirm the table for two at 8 PM"
 FILLER_TEXT = "Checking the menus and latest reviews around you..."
 
 
-def _dotenv_values(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        values[key.strip()] = value.strip().strip("\"'")
-    return values
-
-
 def _print_environment() -> dict[str, str]:
-    values = _dotenv_values(ROOT / ".env")
+    from dotenv import load_dotenv
+    load_dotenv()
     print("\nSTAGE PREFLIGHT - CREDENTIAL PRESENCE ONLY")
     print(f"{'Dependency':<24} {'Status':<34} {'Mode'}")
     print("-" * 80)
@@ -49,11 +48,11 @@ def _print_environment() -> dict[str, str]:
         ("NEO4J_URI", "Graphiti / Neo4j", "LOCAL DETERMINISTIC FALLBACK"),
     )
     for key, label, fallback in rows:
-        configured = bool(os.getenv(key) or values.get(key))
+        configured = bool(os.getenv(key))
         status = "LIVE API" if configured else fallback
         print(f"{label:<24} {'configured' if configured else 'not configured':<34} {status}")
     print("Secrets are never displayed.")
-    return values
+    return {k: os.getenv(k, "") for k, _, _ in rows}
 
 
 async def _warm_local_read_cache() -> None:

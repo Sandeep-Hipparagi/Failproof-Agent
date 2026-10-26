@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import math
+import re
 import secrets
 import time
 import uuid
@@ -15,7 +16,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+load_dotenv()
 
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -30,6 +31,7 @@ from .platform_bridge import PlatformBridge
 from .tools.restaurant_tools import release_tool_session, set_degraded_callback, set_http_client
 
 MAX_AUDIO_BYTES = 16000 * 2 * 60
+CANCEL_DRAIN_SECONDS = 0.25
 logger = logging.getLogger(__name__)
 memory = GraphMemory()
 enclave = Enclave()
@@ -47,7 +49,7 @@ session_registry_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0), limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)) as shared_client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(8.0), limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)) as shared_client:
         sarvam.http_client = shared_client
         set_http_client(shared_client)
         await platform_bridge.start()
@@ -60,10 +62,12 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             await platform_bridge.stop()
-            await harness.close()
+            if hasattr(harness, "close") and callable(harness.close):
+                await harness.close()
             sarvam.http_client = None
             set_http_client(None)
-            await memory.close()
+            if hasattr(memory, "close") and callable(memory.close):
+                await memory.close()
 
 app = FastAPI(title="Failproof Restaurant Concierge", lifespan=lifespan)
 
@@ -73,14 +77,19 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "sarvam_configured": bool(sarvam.api_key), "gemini_configured": bool(harness.client),
-            "graphiti_configured": bool(memory.client), "platform_bridge": platform_bridge.health()}
+    return {
+        "ok": True,
+        "sarvam_configured": bool(getattr(sarvam, "api_key", False)),
+        "gemini_configured": bool(getattr(harness, "client", False)),
+        "graphiti_configured": bool(getattr(memory, "client", False)),
+        "platform_bridge": platform_bridge.health()
+    }
 
 @app.get("/api/home")
 @app.get("/api/home/overview")
 @app.get("/api/trace/dashboards")
 async def dashboard_state():
-    control.graph_connected = bool(memory.client)
+    control.graph_connected = bool(getattr(memory, "client", False))
     return control.metrics()
 
 @app.get("/api/fix/overview-policies")
@@ -143,7 +152,8 @@ async def websocket_endpoint(ws: WebSocket):
     user_id = session_id
     state: dict[str, Any] = {"session_id": session_id, "user_id": user_id, "user_location": {"lat": 12.9716, "lng": 77.5946}, "candidate_restaurants": [], "pending_reservation": None, "pending_offer": None, "voice_approval_verified": False, "last_user_transcript": "", "last_user_speech_started_server_ts": None, "last_user_transcript_server_ts": None, "transcript_received_server_ts": None, "reservation_offer": {}, "messages": [], "emit": lambda item: ws.send_json(item)}
     control.start_session(session_id, state)
-    logger.info("\033[96m[WS]\033[0m connected session=%s sarvam_configured=%s gemini_configured=%s", session_id, bool(sarvam.api_key), bool(harness.client))
+    logger.info("\033[96m[WS]\033[0m connected session=%s sarvam_configured=%s gemini_configured=%s",
+                session_id, bool(getattr(sarvam, "api_key", False)), bool(getattr(harness, "client", False)))
     now = time.monotonic()
     async with session_registry_lock:
         expired = [key for key, value in session_registry.items() if now - value["connected_at"] > 1800]
@@ -270,7 +280,7 @@ async def websocket_endpoint(ws: WebSocket):
                     # new utterance cannot be mistaken for an overlapping turn.
                     task = None
                     try:
-                        await asyncio.wait_for(asyncio.shield(cancelled_task), timeout=0.25)
+                        await asyncio.wait_for(asyncio.shield(cancelled_task), timeout=CANCEL_DRAIN_SECONDS)
                     except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
                 audio_chunks.clear()
@@ -360,6 +370,7 @@ async def websocket_endpoint(ws: WebSocket):
         audio_chunks.clear()
         state.clear()
 
+AFFIRMATIVE_RE = re.compile(r"\b(yes|yeah|yep|confirm|confirmed|book it|lock it in|go ahead|make the reservation)\b", re.I)
+
 def _affirmative(text: str) -> bool:
-    import re
-    return bool(re.search(r"\b(yes|yeah|yep|confirm|confirmed|book it|lock it in|go ahead|make the reservation)\b", text, re.I))
+    return bool(AFFIRMATIVE_RE.search(text))
