@@ -6,11 +6,13 @@ A minimal, voice-only Bengaluru restaurant concierge built around a fail-closed 
 
 ## Architecture
 
-- **Voice pipeline:** Sarvam `saaras:v3` receives mono 16 kHz PCM captured from the microphone. Sarvam `bulbul:v4-flash` produces all spoken responses. The browser has no speech synthesis or default-voice fallback.
+- **Voice pipeline:** Sarvam `saaras:v3` receives mono 16 kHz PCM captured from the microphone. Sarvam `bulbul:v3` produces all spoken responses. The browser has no speech synthesis or default-voice fallback.
 - **Reasoning and tools:** Google `gemini-2.5-flash` selects restaurant discovery, review, menu, availability, and reservation tools. Independent tool calls run concurrently; Sarvam acoustic filler masks lookup latency.
 - **Failproof runtime enclave:** Every tool call is validated before execution. The enclave supports `allow`, `steer`, and `break-loop` outcomes, hashes reservation offer details into an offer ID, and accepts booking only after the client reports natural completion with `TTS_PLAYBACK_COMPLETED`. Server receipt timestamps enforce that the affirmative transcript arrived after playback completion.
 - **Temporal memory:** Graphiti (`getzep/graphiti`) retrieves preference and booking facts and ingests conversation episodes. Neo4j is provided through Docker Compose; in-process memory is used automatically if Graphiti is unavailable.
 - **Restaurant data:** Google Places API (New) is optional. Local Bengaluru discovery data remains available when Places is missing or rate-limited.
+- **Cost controls:** Read-only restaurant tools use a 300-second argument-keyed cache, tool histories are reduced to decision-relevant fields, and the standard acoustic filler is warmed and cached when Sarvam is configured.
+- **Audit durability:** Verdicts and gate snapshots are fsync-committed to a SHA-256 chained JSONL ledger. Verify with `GET /api/fix/activity/verify`.
 
 ## Requirements
 

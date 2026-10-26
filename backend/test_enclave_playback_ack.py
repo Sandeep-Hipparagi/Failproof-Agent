@@ -1,5 +1,4 @@
 """Focused async tests for the client playback proof and causal booking gate. Developed by Sandeep Hipparagi."""
-import asyncio
 import time
 
 from backend.failproof_enclave import Enclave
@@ -69,4 +68,3 @@ if __name__ == "__main__":
                  test_interrupted_offer_is_steered_even_with_affirmative,
                  test_post_playback_affirmative_is_allowed):
         test()
-    asyncio.run(asyncio.sleep(0))

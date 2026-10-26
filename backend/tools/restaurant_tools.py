@@ -1,22 +1,97 @@
 """Restaurant discovery and booking tools with deterministic Bengaluru demo data. Developed by Sandeep Hipparagi."""
 from __future__ import annotations
 
-import asyncio
+import contextvars
+import functools
+import hashlib
+import inspect
+import json
 import os
+import threading
 import time
 import uuid
+from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 
 import httpx
+from ..resilience import resilient_call
 
 SEED: list[dict[str, Any]] = [
     {"place_id": "seed_mtr_lalbagh", "name": "MTR (Lalbagh Road)", "rating": 4.4, "address": "14, Lalbagh Road, Bengaluru", "price_level": 2, "cuisine": "South Indian", "reviews": ["Excellent rava idli and service", "Busy at peak hours", "Clean dining room"], "menu": [{"name": "Rava Idli", "price_inr": 95, "allergens": ["dairy", "gluten"]}, {"name": "Masala Dosa", "price_inr": 120, "allergens": ["dairy", "gluten"]}, {"name": "Kesari Bath", "price_inr": 85, "allergens": ["dairy", "nuts"]}]},
     {"place_id": "seed_vidyarthi_bhavan", "name": "Vidyarthi Bhavan", "rating": 4.3, "address": "32, Gandhi Bazaar Main Road, Basavanagudi", "price_level": 1, "cuisine": "South Indian", "reviews": ["Crisp benne dosa", "Long waits on weekends", "Friendly staff"], "menu": [{"name": "Benne Masala Dosa", "price_inr": 90, "allergens": ["dairy", "gluten"]}, {"name": "Idli Vada", "price_inr": 75, "allergens": ["dairy"]}, {"name": "Filter Coffee", "price_inr": 35, "allergens": ["dairy"]}]},
     {"place_id": "seed_toit_indiranagar", "name": "Toit, Indiranagar", "rating": 4.5, "address": "298, 100 Feet Road, Indiranagar", "price_level": 3, "cuisine": "Continental", "reviews": ["Great ambience", "Can be noisy in the evening", "Helpful service"], "menu": [{"name": "Grilled Chicken Bowl", "price_inr": 480, "allergens": []}, {"name": "Paneer Salad", "price_inr": 390, "allergens": ["dairy", "nuts"]}, {"name": "Mushroom Pizza", "price_inr": 420, "allergens": ["dairy", "gluten"]}]},
-    {"place_id": "seed_ಸರೂja", "name": "Nagarjuna, Residency Road", "rating": 4.2, "address": "Residency Road, Bengaluru", "price_level": 2, "cuisine": "Andhra", "reviews": ["Spicy meals", "Quick service", "Some peak-time waits"], "menu": [{"name": "Andhra Chicken Meal", "price_inr": 350, "allergens": []}, {"name": "Paneer Meal", "price_inr": 290, "allergens": ["dairy"]}, {"name": "Gutti Vankaya", "price_inr": 260, "allergens": ["nuts"]}]},
+    {"place_id": "seed_nagarjuna_residency", "name": "Nagarjuna, Residency Road", "rating": 4.2, "address": "Residency Road, Bengaluru", "price_level": 2, "cuisine": "Andhra", "reviews": ["Spicy meals", "Quick service", "Some peak-time waits"], "menu": [{"name": "Andhra Chicken Meal", "price_inr": 350, "allergens": []}, {"name": "Paneer Meal", "price_inr": 290, "allergens": ["dairy"]}, {"name": "Gutti Vankaya", "price_inr": 260, "allergens": ["nuts"]}]},
 ]
 _holds: dict[str, dict[str, Any]] = {}
 _bookings: dict[str, dict[str, Any]] = {}
+_read_cache: dict[str, tuple[float, Any]] = {}
+_read_cache_lock = threading.Lock()
+_cache_ttl_seconds = 300
+_http_client: httpx.AsyncClient | None = None
+_on_degraded: Callable[[str, str], None] | None = None
+TOOL_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar("failproof_tool_session", default="direct")
+
+
+def set_http_client(client: httpx.AsyncClient | None) -> None:
+    global _http_client
+    _http_client = client
+
+
+def set_degraded_callback(callback: Callable[[str, str], None] | None) -> None:
+    global _on_degraded
+    _on_degraded = callback
+
+
+def release_tool_session(session_id: str) -> None:
+    prefix = f"{session_id}:"
+    for key in tuple(_holds):
+        if key.startswith(prefix):
+            _holds.pop(key, None)
+    for key in tuple(_bookings):
+        if key.startswith(prefix):
+            _bookings.pop(key, None)
+
+
+def _degraded(code: str, detail: str) -> None:
+    if _on_degraded:
+        _on_degraded(code, detail)
+
+
+def ttl_cache(function):
+    @functools.wraps(function)
+    async def wrapped(*args, **kwargs):
+        bound = inspect.signature(function).bind(*args, **kwargs)
+        bound.apply_defaults()
+        raw = json.dumps(bound.arguments, sort_keys=True, separators=(",", ":"), default=str)
+        key = hashlib.sha256((function.__name__ + raw).encode()).hexdigest()
+        now = time.monotonic()
+        with _read_cache_lock:
+            cached = _read_cache.get(key)
+            if cached and cached[0] > now:
+                return deepcopy(cached[1])
+            _read_cache.pop(key, None)
+        value = await function(*args, **kwargs)
+        with _read_cache_lock:
+            _read_cache[key] = (time.monotonic() + _cache_ttl_seconds, deepcopy(value))
+            if len(_read_cache) > 512:
+                expired = [cache_key for cache_key, entry in _read_cache.items() if entry[0] <= time.monotonic()]
+                for cache_key in expired:
+                    _read_cache.pop(cache_key, None)
+        return value
+    return wrapped
+
+
+async def _places_request(method: str, url: str, **kwargs):
+    async def request(client):
+        response = await client.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response
+    client = _http_client
+    if client is not None:
+        return await resilient_call(lambda: request(client), timeout=4.0, attempts=2, service="google-places")
+    async with httpx.AsyncClient(timeout=4.0) as temporary_client:
+        return await resilient_call(lambda: request(temporary_client), timeout=4.0, attempts=2, service="google-places")
 
 
 def _seed_matches(cuisine: str, radius_m: int = 3000) -> list[dict[str, Any]]:
@@ -25,35 +100,39 @@ def _seed_matches(cuisine: str, radius_m: int = 3000) -> list[dict[str, Any]]:
     return [{k: r[k] for k in ("place_id", "name", "rating", "address", "price_level")} for r in (matches or SEED)[:3]]
 
 
+@ttl_cache
 async def discover_nearby_restaurants(lat: float, lng: float, cuisine: str, radius_m: int = 3000) -> dict[str, Any]:
     key = os.getenv("GOOGLE_PLACES_API_KEY")
     if key:
         try:
-            async with httpx.AsyncClient(timeout=3.5) as client:
-                resp = await client.post("https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "places.id,places.displayName,places.rating,places.formattedAddress,places.priceLevel"}, json={"textQuery": f"{cuisine} restaurants", "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}}, "maxResultCount": 3})
-                resp.raise_for_status()
-                rows = resp.json().get("places", [])[:3]
-                if rows:
-                    return {"restaurants": [{"place_id": p["id"], "name": p.get("displayName", {}).get("text", ""), "rating": p.get("rating"), "address": p.get("formattedAddress", ""), "price_level": p.get("priceLevel")} for p in rows], "source": "google_places"}
-        except Exception:
-            pass
+            resp = await _places_request("POST", "https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "places.id,places.displayName,places.rating,places.formattedAddress,places.priceLevel"}, json={"textQuery": f"{cuisine} restaurants", "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}}, "maxResultCount": 3})
+            resp.raise_for_status()
+            rows = resp.json().get("places", [])[:3]
+            if rows:
+                return {"restaurants": [{"place_id": p["id"], "name": p.get("displayName", {}).get("text", ""), "rating": p.get("rating"), "address": p.get("formattedAddress", ""), "price_level": p.get("priceLevel")} for p in rows], "source": "google_places"}
+        except Exception as exc:
+            _degraded("GOOGLE_PLACES_FALLBACK", f"Places unavailable; using local dataset ({type(exc).__name__})")
+    else:
+        _degraded("GOOGLE_PLACES_FALLBACK", "Google Places key is not configured; using local dataset")
     return {"restaurants": _seed_matches(cuisine, radius_m), "source": "local_bengaluru_fallback"}
 
 
+@ttl_cache
 async def verify_google_reviews(place_id: str) -> dict[str, Any]:
     key = os.getenv("GOOGLE_PLACES_API_KEY")
     if key and not place_id.startswith("seed_"):
         try:
-            async with httpx.AsyncClient(timeout=3.5) as client:
-                resp = await client.get(f"https://places.googleapis.com/v1/places/{place_id}", headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "reviews"})
-                resp.raise_for_status()
-                reviews = [r.get("text", {}).get("text", "") for r in resp.json().get("reviews", [])]
-                if reviews:
-                    return _summarize_reviews(reviews)
-        except Exception:
-            pass
+            resp = await _places_request("GET", f"https://places.googleapis.com/v1/places/{place_id}", headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "reviews"})
+            resp.raise_for_status()
+            reviews = [r.get("text", {}).get("text", "") for r in resp.json().get("reviews", [])]
+            if reviews:
+                return {**_summarize_reviews(reviews), "source": "google_places"}
+        except Exception as exc:
+            _degraded("GOOGLE_PLACES_FALLBACK", f"Reviews unavailable; using local dataset ({type(exc).__name__})")
+    elif key is None:
+        _degraded("GOOGLE_PLACES_FALLBACK", "Google Places key is not configured; using local review data")
     row = next((r for r in SEED if r["place_id"] == place_id), None)
-    return _summarize_reviews(row["reviews"] if row else ["Review data unavailable; verify with venue."])
+    return {**_summarize_reviews(row["reviews"] if row else ["Review data unavailable; verify with venue."]), "source": "local_bengaluru_fallback"}
 
 
 def _summarize_reviews(reviews: list[str]) -> dict[str, Any]:
@@ -62,6 +141,7 @@ def _summarize_reviews(reviews: list[str]) -> dict[str, Any]:
     return {"recent_review_sample": reviews[:5], "pros": [x for x in ("ambience", "service", "clean", "food", "friendly") if x in joined], "cons": [x for x in ("noisy", "wait", "slow", "crowded") if x in joined], "red_flag": red, "red_flag_reason": "Potential hygiene or service complaints found" if red else None}
 
 
+@ttl_cache
 async def inspect_menu_and_dietary_fit(place_id: str, dietary_constraints: list[str]) -> dict[str, Any]:
     row = next((r for r in SEED if r["place_id"] == place_id), None)
     if not row:
@@ -79,22 +159,27 @@ async def inspect_menu_and_dietary_fit(place_id: str, dietary_constraints: list[
 async def check_table_availability(place_id: str, time_slot: str, party_size: int) -> dict[str, Any]:
     if party_size < 1 or party_size > 20:
         return {"available": False, "reason": "Party size must be between 1 and 20"}
+    now = time.time()
+    for key, hold in tuple(_holds.items()):
+        if hold["expires_at"] < now:
+            _holds.pop(key, None)
     token = "hold_" + uuid.uuid4().hex[:12]
-    _holds[token] = {"place_id": place_id, "time_slot": time_slot, "party_size": party_size, "expires_at": time.time() + 300}
+    _holds[f"{TOOL_SESSION_ID.get()}:{token}"] = {"place_id": place_id, "time_slot": time_slot, "party_size": party_size, "expires_at": time.time() + 300}
     return {"available": True, "hold_token": token, "expires_in_seconds": 300, "time_slot": time_slot, "party_size": party_size, "note": "Temporary demo hold only; no booking has been made."}
 
 
 async def execute_reservation(place_id: str, restaurant_name: str, time_slot: str, party_size: int, hold_token: str, user_confirmation_quote: str) -> dict[str, Any]:
-    hold = _holds.get(hold_token)
+    session_hold = f"{TOOL_SESSION_ID.get()}:{hold_token}"
+    hold = _holds.get(session_hold)
     if not hold or hold["expires_at"] < time.time():
         return {"confirmed": False, "reason": "Hold token is missing or expired"}
     if (hold["place_id"], hold["time_slot"], hold["party_size"]) != (place_id, time_slot, party_size):
         return {"confirmed": False, "reason": "Reservation details do not match the availability hold"}
-    if hold_token in _bookings:
+    if session_hold in _bookings:
         return {"confirmed": False, "reason": "This hold token has already been used"}
     ref = "FP-" + uuid.uuid4().hex[:8].upper()
     result = {"confirmed": True, "booking_reference": ref, "restaurant_name": restaurant_name, "time_slot": time_slot, "party_size": party_size, "place_id": place_id}
-    _bookings[hold_token] = result
+    _bookings[session_hold] = result
     return result
 
 

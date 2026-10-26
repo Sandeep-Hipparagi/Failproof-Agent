@@ -1,7 +1,6 @@
 """Two-act local WebSocket rehearsal for playback interception and recovery. Developed by Sandeep Hipparagi."""
 from __future__ import annotations
 
-import asyncio
 import sys
 import time
 from pathlib import Path

@@ -11,8 +11,9 @@ from typing import Any, TypedDict
 
 from .failproof_enclave import Enclave, validate_tool_args
 from .graph_memory import GraphMemory
+from .resilience import resilient_call
 from .sarvam_client import SarvamClient
-from .tools.restaurant_tools import TOOL_FUNCTIONS
+from .tools.restaurant_tools import TOOL_FUNCTIONS, TOOL_SESSION_ID
 
 class ConciergeState(TypedDict, total=False):
     session_id: str
@@ -68,7 +69,16 @@ class AgentHarness:
     def _route_gate(state): return "execute" if state.get("pending_calls") else "done"
 
     async def ingest_voice_and_memory(self, state: dict[str, Any]) -> dict[str, Any]:
+        cp = getattr(self.enclave, "control_plane", None)
+        started = time.perf_counter()
         state["memory"] = await self.memory.retrieve_preferences(state.get("user_id", state["session_id"]))
+        if cp:
+            cp.stage(state["session_id"], "graphiti_memory_lookup", started, fallback=not bool(getattr(self.memory, "client", None)))
+            cp.query(state["session_id"], "getzep/graphiti" if getattr(self.memory, "client", None) else "local-memory", "restaurant preferences", time.perf_counter()-started)
+            if not getattr(self.memory, "client", None): cp.alert("WARNING", "GRAPHITI_FALLBACK", state["session_id"], "Graphiti unavailable; local memory fallback active")
+            relationships = state["memory"].get("relationships", {})
+            if state["session_id"] in cp.sessions:
+                cp.sessions[state["session_id"]]["dietary_constraints"] = relationships.get("DIETARY_RESTRICTION", [])
         state.setdefault("messages", []).append({"role": "user", "content": state.get("last_user_transcript", "")})
         state.setdefault("candidate_restaurants", [])
         state.setdefault("pending_reservation", None)
@@ -83,8 +93,20 @@ class AgentHarness:
         from google.genai import types
         declarations = [_function_declaration(name, fn) for name, fn in TOOL_FUNCTIONS.items()]
         config = types.GenerateContentConfig(system_instruction=_system_prompt(state), tools=[types.Tool(function_declarations=declarations)], automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), thinking_config=types.ThinkingConfig(thinking_budget=0))
-        contents = state["messages"]
-        response = await asyncio.to_thread(self.client.models.generate_content, model=self.model, contents=contents, config=config)
+        contents = state["messages"][-12:]
+        started = time.perf_counter()
+        try:
+            response = await resilient_call(lambda: asyncio.to_thread(self.client.models.generate_content, model=self.model, contents=contents, config=config), timeout=4.0, attempts=2, service="gemini")
+        except Exception as exc:
+            cp = getattr(self.enclave, "control_plane", None)
+            if cp: cp.alert("WARNING", "GEMINI_FALLBACK", state["session_id"], f"Reasoning unavailable ({type(exc).__name__})")
+            state["response"] = "I can't reach the restaurant assistant right now. Please try again in a moment."
+            state["pending_calls"] = []
+            return state
+        cp = getattr(self.enclave, "control_plane", None)
+        if cp:
+            cp.stage(state["session_id"], "gemini_reasoning", started)
+            cp.query(state["session_id"], self.model, json.dumps(contents, default=str), time.perf_counter()-started)
         calls = []
         for part in response.candidates[0].content.parts:
             if getattr(part, "function_call", None):
@@ -96,10 +118,28 @@ class AgentHarness:
         return state
 
     async def failproof_policy_gate(self, state: dict[str, Any]) -> dict[str, Any]:
+        cp = getattr(self.enclave, "control_plane", None)
         allowed = []
         for call in state.get("pending_calls", []):
+            if cp: cp.snapshot(state["session_id"], "before", state)
+            started = time.perf_counter()
             valid, reason = validate_tool_args(call["name"], call["args"])
             verdict = self.enclave.intercept(session_id=state["session_id"], tool_name=call["name"], args=call["args"], state=state) if valid else {"verdict": "deny", "reason": reason}
+            if cp:
+                cp.stage(state["session_id"], "failproof_enclave_gate", started, tool_name=call["name"], verdict=verdict["verdict"])
+                cp.snapshot(state["session_id"], "after", state)
+                policy_id = verdict.get("policy") or ("policy_booking_voice_approval" if call["name"] == "execute_reservation" else "policy_loop_and_idempotency" if "loop" in verdict.get("reason", "").lower() else "policy_schema_and_pii_guard")
+                receipt = {}
+                if call["name"] == "execute_reservation":
+                    offer = state.get("pending_offer") or {}
+                    offer_id = hashlib.sha256(f"{state['session_id']}:{call['args'].get('place_id', '')}:{call['args'].get('time_slot', '')}:{call['args'].get('party_size', '')}:{call['args'].get('hold_token', '')}".encode()).hexdigest()
+                    playback_ts = offer.get("playback_completed_server_ts")
+                    transcript_ts = state.get("last_user_transcript_server_ts")
+                    receipt = {"offer_id": offer_id,
+                               "causal_proof": {"playback_completed_ts": playback_ts, "transcript_received_ts": transcript_ts,
+                                                "delta_ms": (transcript_ts - playback_ts) * 1000 if playback_ts is not None and transcript_ts is not None else None},
+                               "transcript_sha256": hashlib.sha256(str(state.get("last_user_transcript", "")).encode()).hexdigest()}
+                cp.audit(session_id=state["session_id"], policy_id=policy_id, tool_name=call["name"], verdict=verdict["verdict"], reason=verdict.get("reason", ""), prompt=verdict.get("inject_prompt"), **receipt)
             await _emit(state, {"type": "enclave", **verdict})
             if verdict["verdict"] == "allow": allowed.append(call)
             elif verdict["verdict"] == "steer":
@@ -119,8 +159,29 @@ class AgentHarness:
         if not calls: return state
         filler_task = asyncio.create_task(self._filler(state))
         async def run(call):
-            result = await TOOL_FUNCTIONS[call["name"]](**call["args"])
-            if call["name"] == "discover_nearby_restaurants": state["candidate_restaurants"] = result.get("restaurants", [])
+            started = time.perf_counter()
+            cp = getattr(self.enclave, "control_plane", None)
+            await _emit(state, {"type": "tool_requested", "name": call["name"], "args": call["args"]})
+            session_token = TOOL_SESSION_ID.set(state["session_id"])
+            try:
+                result = await TOOL_FUNCTIONS[call["name"]](**call["args"])
+            finally:
+                TOOL_SESSION_ID.reset(session_token)
+            if cp:
+                cp.stage(state["session_id"], "parallel_tool_execution", started, tool_name=call["name"])
+                if call["name"] in {"discover_nearby_restaurants", "verify_google_reviews"}:
+                    fallback = result.get("source", "").endswith("fallback")
+                    cp.query(state["session_id"], "google-places/local-dataset", json.dumps(call["args"], sort_keys=True), time.perf_counter()-started, fallback=fallback)
+                    if fallback: cp.alert("WARNING", "GOOGLE_PLACES_FALLBACK", state["session_id"], "Local Bengaluru dataset served this request")
+                if call["name"] == "verify_google_reviews":
+                    reviews = " ".join(result.get("recent_review_sample", [])).lower()
+                    positive = sum(reviews.count(w) for w in ("excellent", "great", "friendly", "clean", "helpful"))
+                    negative = sum(reviews.count(w) for w in ("noisy", "wait", "slow", "crowded", "dirty"))
+                    cp.event(state["session_id"], "REVIEW_SENTIMENT", place_id=call["args"].get("place_id"), score=positive-negative, red_flag=result.get("red_flag", False))
+            if call["name"] == "discover_nearby_restaurants":
+                state["candidate_restaurants"] = result.get("restaurants", [])
+                if cp and state["session_id"] in cp.sessions:
+                    cp.sessions[state["session_id"]]["candidate_restaurants"] = result.get("restaurants", [])
             if call["name"] == "check_table_availability" and result.get("hold_token"):
                 hold = {**call["args"], **result}
                 place = next((r for r in state.get("candidate_restaurants", []) if r.get("place_id") == hold["place_id"]), {})
@@ -128,11 +189,15 @@ class AgentHarness:
                 state["pending_reservation"] = hold
                 state["pending_offer"] = _make_offer(state, hold)
             if call["name"] == "execute_reservation" and result.get("confirmed"):
-                self.enclave.committed(call["args"]["hold_token"])
+                self.enclave.committed(call["args"]["hold_token"], state["session_id"])
+                if cp: cp.executed_holds.append(call["args"]["hold_token"])
+                if cp and state["session_id"] in cp.sessions:
+                    cp.sessions[state["session_id"]]["booking_status"] = "CONFIRMED"
                 await self.memory.record_booking(state.get("user_id", state["session_id"]), call["args"]["restaurant_name"], result["booking_reference"])
                 state["pending_offer"] = None
-            await _emit(state, {"type": "tool", "name": call["name"], "result": result})
-            return {"name": call["name"], "result": result}
+            pruned = _prune_tool_result(call["name"], result)
+            await _emit(state, {"type": "tool", "name": call["name"], "result": pruned})
+            return {"name": call["name"], "result": pruned}
         results = await asyncio.gather(*(run(call) for call in calls), return_exceptions=True)
         await asyncio.gather(filler_task, return_exceptions=True)
         state["tool_results"] = [r if isinstance(r, dict) else {"error": str(r)} for r in results]
@@ -142,11 +207,17 @@ class AgentHarness:
 
     async def _filler(self, state):
         try:
-            filler_text = "Let me check the menus and recent reviews around you..."
+            filler_text = "Checking the menus and latest reviews around you..."
+            cp = getattr(self.enclave, "control_plane", None)
+            if cp: cp.event(state["session_id"], "ACOUSTIC_FILLER_TRIGGERED")
+            started = time.perf_counter()
             audio = await self.sarvam.synthesize(filler_text)
             if audio:
+                if cp: cp.stage(state["session_id"], "sarvam_tts", started, model="bulbul:v3", acoustic_filler=True)
                 await _emit(state, {"type": "audio", "text": filler_text, "audio": base64.b64encode(audio).decode()})
-        except Exception:
+        except Exception as exc:
+            cp = getattr(self.enclave, "control_plane", None)
+            if cp: cp.alert("WARNING", "SARVAM_FILLER_UNAVAILABLE", state["session_id"], type(exc).__name__)
             await _emit(state, {"type": "telemetry", "message": "Sarvam filler unavailable; tool execution continues"})
 
     async def tts_response_and_graph_commit(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -154,7 +225,10 @@ class AgentHarness:
         await self.memory.ingest_episode(state.get("user_id", state["session_id"]), f"User: {state.get('last_user_transcript','')}\nAssistant: {response}")
         await _emit(state, {"type": "response", "text": response})
         try:
+            started = time.perf_counter()
             audio = await self.sarvam.synthesize(response)
+            cp = getattr(self.enclave, "control_plane", None)
+            if cp: cp.stage(state["session_id"], "sarvam_tts", started, model="bulbul:v3")
             if audio:
                 payload = {"type": "audio", "text": response, "audio": base64.b64encode(audio).decode()}
                 offer = state.get("pending_offer")
@@ -164,10 +238,15 @@ class AgentHarness:
                     payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True})
                 await _emit(state, payload)
         except Exception as exc:
+            cp = getattr(self.enclave, "control_plane", None)
+            if cp: cp.alert("WARNING", "SARVAM_TTS_UNAVAILABLE", state["session_id"], type(exc).__name__)
             await _emit(state, {"type": "telemetry", "message": f"Sarvam voice output unavailable: {exc}"})
         return state
 
     async def run_turn(self, state: dict[str, Any]) -> dict[str, Any]:
+        cp = getattr(self.enclave, "control_plane", None)
+        if cp and state["session_id"] in cp.sessions:
+            cp.sessions[state["session_id"]]["turns"] += 1
         if self.graph:
             return await self.graph.ainvoke(state, config={"recursion_limit": 12})
         state = await self.ingest_voice_and_memory(state)
@@ -192,13 +271,29 @@ def _offer_sentence(state, args):
 def _system_prompt(state):
     return ("You are a concise, voice-first Bengaluru restaurant concierge. Speak naturally and briefly. Never claim a reservation is booked unless execute_reservation confirms it. Before booking, present exact restaurant name, party size, and time, then request explicit spoken confirmation. Use check_table_availability first. Search in parallel when useful. Use dietary constraints from memory. Memory: " + json.dumps(state.get("memory", {}), default=str))
 
+
+def _prune_tool_result(name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Keep only compact, decision-relevant fields in model and client histories."""
+    if name == "discover_nearby_restaurants":
+        keys = ("place_id", "name", "rating", "price_level")
+        return {"restaurants": [{key: item.get(key) for key in keys} for item in result.get("restaurants", [])[:3]], "source": result.get("source")}
+    if name == "verify_google_reviews":
+        return {"pros": result.get("pros", [])[:3], "cons": result.get("cons", [])[:3], "red_flag": result.get("red_flag", False), "red_flag_reason": result.get("red_flag_reason")}
+    if name == "inspect_menu_and_dietary_fit":
+        return {"dishes": result.get("dishes", [])[:3], "note": result.get("note") or result.get("disclaimer")}
+    if name == "check_table_availability":
+        keys = ("available", "hold_token", "expires_in_seconds", "time_slot", "party_size", "reason")
+        return {key: result[key] for key in keys if key in result}
+    keys = ("confirmed", "booking_reference", "restaurant_name", "time_slot", "party_size", "place_id", "reason")
+    return {key: result[key] for key in keys if key in result}
+
 def _make_offer(state: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
     session_id = str(state["session_id"])
     place_id = str(details["place_id"])
     time_slot = str(details["time_slot"])
     party_size = int(details["party_size"])
     hold_token = str(details["hold_token"])
-    offer_id = hashlib.sha256(f"{session_id}:{place_id}:{time_slot}:{party_size}:{hold_token}".encode()).hexdigest()[:16]
+    offer_id = hashlib.sha256(f"{session_id}:{place_id}:{time_slot}:{party_size}:{hold_token}".encode()).hexdigest()
     restaurant_name = str(details.get("restaurant_name") or next((r.get("name") for r in state.get("candidate_restaurants", []) if r.get("place_id") == place_id), place_id))
     return {"offer_id": offer_id, "place_id": place_id, "restaurant_name": restaurant_name, "time_slot": time_slot,
             "party_size": party_size, "hold_token": hold_token, "offer_playback_verified": False,

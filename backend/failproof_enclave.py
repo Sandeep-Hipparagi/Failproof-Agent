@@ -15,8 +15,18 @@ NEGATED = re.compile(r"\b(no|not|don't|do not|never|cancel|wait|stop)\b", re.I)
 class Enclave:
     """Session-scoped policies. Never infers consent from silence or model output."""
     calls: dict[str, dict[tuple[str, str], int]] = field(default_factory=dict)
-    booked_holds: set[str] = field(default_factory=set)
+    booked_holds: set[Any] = field(default_factory=set)
     last_verdict: str = "allow"
+    control_plane: Any = None
+
+    def inspect_policies(self) -> list[dict[str, Any]]:
+        if self.control_plane:
+            return [{"id": key, **value, "hits": self.control_plane.policy_hits[key]} for key, value in self.control_plane.policies.items()]
+        return [
+            {"id": "policy_booking_voice_approval", "state": "ENABLED", "hook": "pre-tool:execute_reservation", "hits": 0},
+            {"id": "policy_loop_and_idempotency", "state": "ENABLED", "hook": "pre-tool:all tools", "hits": 0},
+            {"id": "policy_schema_and_pii_guard", "state": "ENABLED", "hook": "pre-tool/post-tool", "hits": 0},
+        ]
 
     @staticmethod
     def signature(tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -25,15 +35,25 @@ class Enclave:
 
     def intercept(self, *, session_id: str, tool_name: str, args: dict[str, Any],
                   state: dict[str, Any]) -> dict[str, Any]:
+        policies = self.control_plane.policies if self.control_plane else {}
+        if policies and policies["policy_schema_and_pii_guard"]["state"] == "DISABLED":
+            return {"verdict": "deny", "reason": "SCHEMA_POLICY_DISABLED: schema gate cannot be disabled"}
+        if policies and policies["policy_loop_and_idempotency"]["state"] != "DISABLED":
+            max_calls = self.control_plane.policy_parameters["max_loop_retries"]
+        else:
+            max_calls = 10**9
         sig = self.signature(tool_name, args)
         session_calls = self.calls.setdefault(session_id, {})
         session_calls[sig] = session_calls.get(sig, 0) + 1
-        if session_calls[sig] > 2:
+        if session_calls[sig] > max_calls:
             self.last_verdict = "break-loop"
             return {"verdict": "break-loop", "reason": "Repeated identical tool call limit exceeded"}
         if tool_name == "execute_reservation":
+            if policies and policies["policy_booking_voice_approval"]["state"] == "DISABLED":
+                self.last_verdict = "deny"
+                return {"verdict": "deny", "reason": "BOOKING_POLICY_LOCKED: booking approval policy cannot be disabled"}
             hold = str(args.get("hold_token", ""))
-            if hold and hold in self.booked_holds:
+            if hold and ((session_id, hold) in self.booked_holds or hold in self.booked_holds):
                 self.last_verdict = "break-loop"
                 return {"verdict": "break-loop", "reason": "Reservation hold token was already committed"}
             offer = state.get("pending_offer") or {}
@@ -61,9 +81,13 @@ class Enclave:
         return {"verdict": "steer", "policy": "policy_booking_voice_approval", "reason": reason,
                 "inject_prompt": f"SYSTEM ENCLAVE INTERCEPTION: {prompt}"}
 
-    def committed(self, hold_token: str) -> None:
-        self.booked_holds.add(hold_token)
+    def committed(self, hold_token: str, session_id: str | None = None) -> None:
+        self.booked_holds.add((session_id, hold_token) if session_id else hold_token)
         self.last_verdict = "allow"
+
+    def release_session(self, session_id: str) -> None:
+        self.calls.pop(session_id, None)
+        self.booked_holds = {entry for entry in self.booked_holds if not (isinstance(entry, tuple) and entry[0] == session_id)}
 
 
 def validate_tool_args(name: str, args: dict[str, Any]) -> tuple[bool, str]:
