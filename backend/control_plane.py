@@ -6,6 +6,8 @@ import json
 import os
 import re
 import time
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from collections import Counter
 from copy import deepcopy
@@ -18,6 +20,9 @@ POLICY_DEFAULTS = {
     "policy_loop_and_idempotency": {"state": "ENABLED", "hook": "pre-tool:all tools", "description": "Break after two identical tool calls and reject previously consumed hold tokens."},
     "policy_schema_and_pii_guard": {"state": "ENABLED", "hook": "pre-tool/post-tool", "description": "Fail closed on unknown or invalid tool schemas and redact sensitive transcript/payload fields."},
 }
+
+_LEDGER_LOCKS: dict[str, threading.RLock] = {}
+_LEDGER_LOCKS_GUARD = threading.Lock()
 
 
 class ControlPlane:
@@ -43,7 +48,36 @@ class ControlPlane:
         self.integrity_verified = True
         self.corrupted_block_index: int | None = None
         self._ledger_signature: tuple[int, int] = (0, 0)
+        with _LEDGER_LOCKS_GUARD:
+            self._ledger_thread_lock = _LEDGER_LOCKS.setdefault(str(self.ledger_path.resolve()), threading.RLock())
         self._hydrate_ledger()
+
+    @contextmanager
+    def _ledger_lock(self):
+        """Serialize WORM reads/writes across threads and processes."""
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.ledger_path.with_name(self.ledger_path.name + ".lock")
+        with self._ledger_thread_lock, lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _current_ledger_signature(self) -> tuple[int, int]:
         try:
@@ -69,56 +103,47 @@ class ControlPlane:
     def _append_block(self, *, record_type: str, session_id: str, policy_id: str, tool_name: str,
                       verdict: str, reason_code: str, payload: dict[str, Any] | None = None,
                       accountability: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not self.integrity_verified:
-            raise RuntimeError("WORM ledger integrity failed; writes are locked")
-        signature = self._current_ledger_signature()
-        if signature != self._ledger_signature:
-            status = self.verify_ledger_integrity()
-            if not status["integrity_verified"] or status["block_height"] != len(self.ledger_blocks):
-                self.integrity_verified = False
-                raise RuntimeError("WORM ledger changed outside this process; writes are locked")
-            self._ledger_signature = signature
-        timestamp = self.timestamp()
-        block = {"index": len(self.ledger_blocks), "timestamp": timestamp,
-                 "timestamp_utc": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(), "session_id": session_id,
-                 "policy_id": policy_id, "tool_name": tool_name, "verdict": verdict,
-                 "reason_code": reason_code, "prev_hash": self._audit_hash, "record_type": record_type, "hash_version": 2}
-        if accountability:
-            block.update(accountability)
-        if payload is not None:
-            block["payload"] = payload
-            payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            block["payload_sha256"] = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        block["entry_hash"] = self._entry_hash(block)
-        # Compatibility aliases for existing activity consumers.
-        block["hash"] = block["entry_hash"]
-        block["previous_hash"] = block["prev_hash"]
-        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.ledger_path.open("a", encoding="utf-8", newline="\n") as ledger_file:
-            ledger_file.write(json.dumps(block, sort_keys=True, separators=(",", ":")) + "\n")
-            ledger_file.flush()
-            os.fsync(ledger_file.fileno())
-        self.ledger_blocks.append(block)
-        self._audit_hash = block["entry_hash"]
-        self._ledger_signature = self._current_ledger_signature()
-        return block
+        with self._ledger_lock():
+            if not self.integrity_verified:
+                raise RuntimeError("WORM ledger integrity failed; writes are locked")
+            signature = self._current_ledger_signature()
+            if signature != self._ledger_signature:
+                status, blocks = self._verify_ledger_integrity_unlocked()
+                if not status["integrity_verified"]:
+                    raise RuntimeError("WORM ledger integrity failed; writes are locked")
+                self.ledger_blocks = blocks
+                self._audit_hash = blocks[-1]["entry_hash"] if blocks else "0" * 64
+                self._ledger_signature = signature
+            timestamp = self.timestamp()
+            block = {"index": len(self.ledger_blocks), "timestamp": timestamp,
+                     "timestamp_utc": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(), "session_id": session_id,
+                     "policy_id": policy_id, "tool_name": tool_name, "verdict": verdict,
+                     "reason_code": reason_code, "prev_hash": self._audit_hash, "record_type": record_type, "hash_version": 2}
+            if accountability:
+                block.update(accountability)
+            if payload is not None:
+                block["payload"] = payload
+                payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                block["payload_sha256"] = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            block["entry_hash"] = self._entry_hash(block)
+            block["hash"] = block["entry_hash"]
+            block["previous_hash"] = block["prev_hash"]
+            with self.ledger_path.open("a", encoding="utf-8", newline="\n") as ledger_file:
+                ledger_file.write(json.dumps(block, sort_keys=True, separators=(",", ":")) + "\n")
+                ledger_file.flush()
+                os.fsync(ledger_file.fileno())
+            self.ledger_blocks.append(block)
+            self._audit_hash = block["entry_hash"]
+            self._ledger_signature = self._current_ledger_signature()
+            return block
 
     def _hydrate_ledger(self) -> None:
-        if not self.ledger_path.exists() or self.ledger_path.stat().st_size == 0:
+        with self._ledger_lock():
+            status, parsed = self._verify_ledger_integrity_unlocked()
+            blocks = parsed[:status["block_height"]]
+            self.ledger_blocks = parsed
             self._ledger_signature = self._current_ledger_signature()
-            return
-        blocks: list[dict[str, Any]] = []
-        with self.ledger_path.open("r", encoding="utf-8") as ledger_file:
-            for line in ledger_file:
-                try:
-                    blocks.append(json.loads(line))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    # Keep an explicit malformed sentinel so the verifier reports its position.
-                    blocks.append({"_malformed": True})
-        self.ledger_blocks = blocks
-        self._ledger_signature = self._current_ledger_signature()
-        self.verify_ledger_integrity()
-        valid_blocks = [b for b in blocks if not b.get("_malformed")]
+        valid_blocks = blocks
         if valid_blocks:
             self._audit_hash = valid_blocks[-1].get("entry_hash", "0" * 64)
         for block in valid_blocks:
@@ -136,37 +161,48 @@ class ControlPlane:
             elif block.get("record_type") == "snapshot":
                 self.snapshots.append(block.get("payload", {}))
 
-    def verify_ledger_integrity(self) -> dict[str, Any]:
+    def _verify_ledger_integrity_unlocked(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         previous = "0" * 64
         corrupted: int | None = None
         count = 0
+        blocks: list[dict[str, Any]] = []
         try:
             lines = self.ledger_path.read_text(encoding="utf-8").splitlines() if self.ledger_path.exists() else []
             for index, line in enumerate(lines):
                 try:
                     block = json.loads(line)
-                    valid = (block.get("index") == index and block.get("prev_hash") == previous
+                    required = {"index", "timestamp", "session_id", "policy_id", "tool_name", "verdict", "reason_code", "prev_hash", "entry_hash"}
+                    valid = (isinstance(block, dict) and required.issubset(block)
+                             and block.get("index") == index and block.get("prev_hash") == previous
                              and block.get("entry_hash") == self._entry_hash(block))
+                    if valid and block.get("hash_version") == 2:
+                        valid = block.get("record_type") in {"activity", "snapshot"} and "timestamp_utc" in block
                     if "payload_sha256" in block:
                         payload_json = json.dumps(block["payload"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                         valid = valid and block.get("payload_sha256") == hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-                except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError):
+                except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError, AttributeError, ValueError):
                     valid = False
                     block = {}
                 if not valid:
                     corrupted = index
                     break
                 previous = block["entry_hash"]
+                blocks.append(block)
                 count += 1
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             corrupted = 0
         self.integrity_verified = corrupted is None
         self.corrupted_block_index = corrupted
         if corrupted is not None and not any(a.get("code") == "WORM_LEDGER_TAMPER_DETECTED" and a.get("block_index") == corrupted for a in self.alerts):
             self.alert("CRITICAL", "WORM_LEDGER_TAMPER_DETECTED", "system", f"Ledger integrity failed at block {corrupted}")
             self.alerts[-1]["block_index"] = corrupted
-        return {"integrity_verified": self.integrity_verified, "block_height": count,
-                "corrupted_block_index": corrupted}
+        return ({"integrity_verified": self.integrity_verified, "block_height": count,
+                 "corrupted_block_index": corrupted}, blocks)
+
+    def verify_ledger_integrity(self) -> dict[str, Any]:
+        with self._ledger_lock():
+            status, _ = self._verify_ledger_integrity_unlocked()
+            return status
 
     def playback_ack(self, offer_id: str, timestamp: float) -> None:
         print(f"[FAILPROOF-ACK] offer_id={offer_id} | TTS_PLAYBACK_COMPLETED locked at t1={timestamp:.3f}", flush=True)
@@ -236,7 +272,7 @@ class ControlPlane:
     @staticmethod
     def redact(value):
         if isinstance(value, dict):
-            return {k: ("[REDACTED]" if re.search(r"email|phone|address|confirmation_quote|api_key|password|secret|credit_card", str(k), re.I) else ControlPlane.redact(v)) for k, v in value.items()}
+            return {k: ("[REDACTED]" if re.search(r"email|phone|address|confirmation_quote|api_key|password|secret|credit_card|ack_token", str(k), re.I) else ControlPlane.redact(v)) for k, v in value.items()}
         if isinstance(value, list):
             return [ControlPlane.redact(item) for item in value]
         if isinstance(value, str):
@@ -310,6 +346,8 @@ class ControlPlane:
                 if related:
                     s = related[-1]
                     checks["CHECK_CAUSAL_AUDIO_ACK"] &= bool(s["offer_playback_verified"] and s["last_user_transcript_server_ts"] and s["playback_completed_server_ts"] and s["last_user_transcript_server_ts"] > s["playback_completed_server_ts"])
+                else:
+                    checks["CHECK_CAUSAL_AUDIO_ACK"] = False
         for name, ok in checks.items():
             self.checks[name] += 1
         clean = sum(1 for s in self.sessions.values() if s["booking_status"] in {"NONE", "CONFIRMED"})

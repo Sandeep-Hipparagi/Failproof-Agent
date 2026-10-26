@@ -13,6 +13,7 @@ A minimal, voice-only Bengaluru restaurant concierge built around a fail-closed 
 - **Restaurant data:** Google Places API (New) is optional. Local Bengaluru discovery data remains available when Places is missing or rate-limited.
 - **Cost controls:** Read-only restaurant tools use a 300-second argument-keyed cache, tool histories are reduced to decision-relevant fields, and the standard acoustic filler is warmed and cached when Sarvam is configured.
 - **Audit durability:** Verdicts and gate snapshots are fsync-committed to a SHA-256 chained JSONL ledger. Verify with `GET /api/fix/activity/verify`.
+- **Hosted telemetry (optional):** `backend/platform_bridge.py` forwards signed WORM blocks, transcript-free session telemetry, and machine heartbeats to a configured HTTPS `/events` ingest URL. It is disabled when configuration is absent. Failproof-hosted ingestion uses a separate ingest hostname and requires its scoped API key plus mTLS certificate and key; `/blazingfast` is the dashboard, not the ingest endpoint.
 
 ## Requirements
 
@@ -28,6 +29,8 @@ A minimal, voice-only Bengaluru restaurant concierge built around a fail-closed 
 4. From the project root, run `uvicorn backend.main:app --reload`.
 5. Open `http://localhost:8000`, allow microphone access, and hold the center orb while speaking.
 
+To enable hosted telemetry, obtain the tenant's ingest URL, `events:add` API key, and client certificate/key from the platform administrator. Configure `FAILPROOF_PLATFORM_INGEST_URL`, `FAILPROOF_PLATFORM_API_KEY`, `FAILPROOF_PLATFORM_CLIENT_CERT`, and `FAILPROOF_PLATFORM_CLIENT_KEY` in `.env`. Delivery retries in memory with backoff; absent or invalid configuration leaves local operation available.
+
 ## Rehearsal and verification
 
 Run `python -m py_compile backend/*.py backend/tools/*.py` and `pytest` for unit checks. Run `python backend/smoke_test_live_loop.py` for a deterministic WebSocket rehearsal of the interruption-to-steer and verified-playback-to-booking sequence. The smoke rehearsal uses local test doubles for speech recognition and model decisions; it does not require API credentials or create a live restaurant booking.
@@ -35,6 +38,7 @@ Run `python -m py_compile backend/*.py backend/tools/*.py` and `pytest` for unit
 ## Source map
 
 - `backend/main.py`: FastAPI endpoints, WebSocket event handling, server-side causal timestamps.
+- `backend/platform_bridge.py`: optional authenticated WORM/session/heartbeat bridge.
 - `backend/sarvam_client.py`: Sarvam STT and TTS requests.
 - `backend/agent_harness.py`: LangGraph state cycle, Gemini tool loop, offer hashing, and filler audio.
 - `backend/failproof_enclave.py`: argument validation, booking policies, idempotency, and loop breaker.

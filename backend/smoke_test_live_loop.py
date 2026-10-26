@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import secrets
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -34,7 +35,8 @@ class RehearsalHarness:
                        "restaurant_name": "MTR (Lalbagh Road)"}
             state["pending_reservation"] = details
             state["pending_offer"] = _make_offer(state, details)
-            await state["emit"]({"type": "audio", "text": "MTR (Lalbagh Road), party of 2, at 8:00 PM. Shall I book it?", "audio": "", "offer_id": state["pending_offer"]["offer_id"], "requires_playback_ack": True})
+            _prepare_offer_audio(state["pending_offer"])
+            await state["emit"]({"type": "audio", "text": "MTR (Lalbagh Road), party of 2, at 8:00 PM. Shall I book it?", "audio": "", "offer_id": state["pending_offer"]["offer_id"], "requires_playback_ack": True, "playback_ack_token": state["pending_offer"]["playback_ack_token"]})
             return state
 
         args = {"place_id": "seed_mtr_lalbagh", "restaurant_name": "MTR (Lalbagh Road)",
@@ -45,7 +47,8 @@ class RehearsalHarness:
         await state["emit"]({"type": "enclave", **verdict})
         if verdict["verdict"] != "allow":
             # Re-state the same terms and preserve the offer ID; only playback completion can unlock it.
-            await state["emit"]({"type": "audio", "text": "MTR (Lalbagh Road), party of 2, at 8:00 PM. Shall I book it?", "audio": "", "offer_id": state["pending_offer"]["offer_id"], "requires_playback_ack": True})
+            _prepare_offer_audio(state["pending_offer"])
+            await state["emit"]({"type": "audio", "text": "MTR (Lalbagh Road), party of 2, at 8:00 PM. Shall I book it?", "audio": "", "offer_id": state["pending_offer"]["offer_id"], "requires_playback_ack": True, "playback_ack_token": state["pending_offer"]["playback_ack_token"]})
             return state
         result = await execute_reservation(**args)
         assert result["confirmed"], result
@@ -66,6 +69,14 @@ def _until(ws, predicate, *, limit: int = 20) -> list[dict]:
     raise AssertionError(f"Expected WebSocket event not received; saw {messages!r}")
 
 
+def _prepare_offer_audio(offer: dict) -> None:
+    offer["offer_playback_verified"] = False
+    offer["playback_completed_server_ts"] = None
+    offer["playback_ack_received"] = False
+    offer["playback_ack_pending"] = True
+    offer["playback_ack_token"] = secrets.token_urlsafe(24)
+
+
 def run_rehearsal() -> None:
     transcripts = iter(("Find a South Indian restaurant in Bengaluru", "Yes, book it right now", "Yes, confirm the table for two at 8 PM"))
 
@@ -81,18 +92,20 @@ def run_rehearsal() -> None:
             ws.send_json({"type": "AUDIO_END"})
             first = _until(ws, lambda item: item.get("type") == "audio" and item.get("offer_id"))
             offer_id = next(item["offer_id"] for item in first if item.get("type") == "audio")
+            ack_token = next(item["playback_ack_token"] for item in first if item.get("type") == "audio")
 
-            ws.send_json({"type": "TTS_PLAYBACK_INTERRUPTED", "offer_id": offer_id, "client_ts": int(time.time() * 1000)})
+            ws.send_json({"type": "TTS_PLAYBACK_INTERRUPTED", "offer_id": offer_id, "playback_ack_token": ack_token, "client_ts": int(time.time() * 1000)})
             _until(ws, lambda item: item.get("type") == "playback_verification" and item.get("status") == "interrupted")
             ws.send_bytes(b"simulated pcm")
             ws.send_json({"type": "AUDIO_END"})
             act1 = _until(ws, lambda item: item.get("type") == "audio" and item.get("offer_id") == offer_id)
+            ack_token = next(item["playback_ack_token"] for item in act1 if item.get("type") == "audio")
             steers = [item for item in act1 if item.get("type") == "enclave" and item.get("verdict") == "steer"]
             assert steers and steers[0]["reason"].startswith("AUDIO_PLAYBACK_UNVERIFIED"), act1
             assert not any(item.get("type") == "tool" and item.get("name") == "execute_reservation" for item in act1), act1
 
             # Act 2: full replay acknowledgment, then a later affirmative transcript.
-            ws.send_json({"type": "TTS_PLAYBACK_COMPLETED", "offer_id": offer_id, "client_ts": int(time.time() * 1000)})
+            ws.send_json({"type": "TTS_PLAYBACK_COMPLETED", "offer_id": offer_id, "playback_ack_token": ack_token, "client_ts": int(time.time() * 1000)})
             _until(ws, lambda item: item.get("type") == "playback_verification" and item.get("status") == "verified")
             time.sleep(0.05)
             ws.send_bytes(b"simulated pcm")

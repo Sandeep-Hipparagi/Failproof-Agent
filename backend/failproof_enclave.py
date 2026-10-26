@@ -35,6 +35,9 @@ class Enclave:
 
     def intercept(self, *, session_id: str, tool_name: str, args: dict[str, Any],
                   state: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(args, dict) or not isinstance(state, dict):
+            self.last_verdict = "deny"
+            return {"verdict": "deny", "reason": "MALFORMED_TOOL_INPUT: tool arguments and runtime state must be objects"}
         policies = self.control_plane.policies if self.control_plane else {}
         if policies and policies["policy_schema_and_pii_guard"]["state"] == "DISABLED":
             return {"verdict": "deny", "reason": "SCHEMA_POLICY_DISABLED: schema gate cannot be disabled"}
@@ -57,8 +60,10 @@ class Enclave:
                 self.last_verdict = "break-loop"
                 return {"verdict": "break-loop", "reason": "Reservation hold token was already committed"}
             offer = state.get("pending_offer") or {}
-            terms = ("place_id", "time_slot", "party_size", "hold_token")
-            if not offer or any(str(offer.get(k, "")) != str(args.get(k, "")) for k in terms):
+            terms = ("place_id", "time_slot", "party_size", "hold_token", "restaurant_name")
+            if (not offer or any(not offer.get(k) for k in terms)
+                    or any(str(offer.get(k, "")) != str(args.get(k, "")) for k in terms)
+                    or offer.get("offer_id") != self.offer_id(session_id, offer)):
                 return self._steer("OFFER_MISMATCH: Reservation arguments do not match the active offer.",
                                    "The requested reservation does not match the active offer. Recheck availability and present the exact terms again.")
             if offer.get("offer_playback_verified") is not True or offer.get("playback_completed_server_ts") is None:
@@ -81,6 +86,11 @@ class Enclave:
         return {"verdict": "steer", "policy": "policy_booking_voice_approval", "reason": reason,
                 "inject_prompt": f"SYSTEM ENCLAVE INTERCEPTION: {prompt}"}
 
+    @staticmethod
+    def offer_id(session_id: str, offer: dict[str, Any]) -> str:
+        source = f"{session_id}:{offer.get('place_id', '')}:{offer.get('time_slot', '')}:{offer.get('party_size', '')}:{offer.get('hold_token', '')}"
+        return hashlib.sha256(source.encode()).hexdigest()[:16]
+
     def committed(self, hold_token: str, session_id: str | None = None) -> None:
         self.booked_holds.add((session_id, hold_token) if session_id else hold_token)
         self.last_verdict = "allow"
@@ -99,11 +109,18 @@ def validate_tool_args(name: str, args: dict[str, Any]) -> tuple[bool, str]:
         "check_table_availability": {"place_id": str, "time_slot": str, "party_size": int},
         "execute_reservation": {"place_id": str, "restaurant_name": str, "time_slot": str, "party_size": int, "hold_token": str, "user_confirmation_quote": str},
     }
+    if not isinstance(args, dict):
+        return False, "Tool arguments must be an object"
     schema = schemas.get(name)
     if schema is None:
         return False, "Unknown tool"
     for key, kind in schema.items():
         value = args.get(key)
-        if not isinstance(value, kind) or (kind is str and not value.strip()):
+        if (not isinstance(value, kind) or isinstance(value, bool) and kind is int
+                or kind is str and not value.strip()):
             return False, f"Invalid or missing argument: {key}"
+    if name == "check_table_availability" and not 1 <= args["party_size"] <= 20:
+        return False, "party_size must be between 1 and 20"
+    if name == "execute_reservation" and not 1 <= args["party_size"] <= 20:
+        return False, "party_size must be between 1 and 20"
     return True, ""

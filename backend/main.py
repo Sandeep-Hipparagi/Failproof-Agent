@@ -2,11 +2,18 @@
 from __future__ import annotations
 import asyncio
 import json
+import math
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
 
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -17,15 +24,17 @@ from .failproof_enclave import Enclave
 from .graph_memory import GraphMemory
 from .sarvam_client import SarvamClient
 from .control_plane import ControlPlane
+from .platform_bridge import PlatformBridge
 from .tools.restaurant_tools import release_tool_session, set_degraded_callback, set_http_client
 
-ROOT = Path(__file__).resolve().parent.parent
+MAX_AUDIO_BYTES = 16000 * 2 * 60
 memory = GraphMemory()
 enclave = Enclave()
 sarvam = SarvamClient()
 harness = AgentHarness(memory, enclave, sarvam)
 control = ControlPlane()
 enclave.control_plane = control
+platform_bridge = PlatformBridge(control)
 control.graph_connected = bool(memory.client)
 control.voice_models.append(sarvam.tts_model)
 memory.on_degraded = lambda code, message: control.alert("WARNING", code, "system", message)
@@ -38,6 +47,7 @@ async def lifespan(app: FastAPI):
     async with httpx.AsyncClient(timeout=httpx.Timeout(4.0), limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)) as shared_client:
         sarvam.http_client = shared_client
         set_http_client(shared_client)
+        await platform_bridge.start()
         try:
             if sarvam.api_key:
                 try:
@@ -46,6 +56,7 @@ async def lifespan(app: FastAPI):
                     control.alert("WARNING", "SARVAM_FILLER_PREWARM_FAILED", "system", type(exc).__name__)
             yield
         finally:
+            await platform_bridge.stop()
             sarvam.http_client = None
             set_http_client(None)
             await memory.close()
@@ -58,7 +69,8 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "sarvam_configured": bool(sarvam.api_key), "gemini_configured": bool(harness.client), "graphiti_configured": bool(memory.client)}
+    return {"ok": True, "sarvam_configured": bool(sarvam.api_key), "gemini_configured": bool(harness.client),
+            "graphiti_configured": bool(memory.client), "platform_bridge": platform_bridge.health()}
 
 @app.get("/api/home")
 @app.get("/api/home/overview")
@@ -139,20 +151,24 @@ async def websocket_endpoint(ws: WebSocket):
     async def emit(item):
         kinds = {"status": None, "transcript": "STT_FINAL_TRANSCRIPT", "tool_requested": "TOOL_CALL_REQUESTED", "audio": "TTS_CHUNK_STREAMED", "enclave": "ENCLAVE_VERDICT"}
         if kinds.get(item.get("type")):
-            live = control.event(session_id, kinds[item["type"]], **{k:v for k,v in item.items() if k not in {"type", "audio"}})
+            live = control.event(session_id, kinds[item["type"]], **{k:v for k,v in item.items() if k not in {"type", "audio", "playback_ack_token"}})
             await ws.send_json({"type": "live_event", "event": live})
         if item.get("type") != "tool_requested":
             await ws.send_json(item)
         await ws.send_json({"type": "home_metrics", "metrics": control.metrics()})
     state["emit"] = emit
     audio_chunks: list[bytes] = []
+    audio_size = 0
+    audio_overflow = False
     turn_lock = asyncio.Lock()
     task: asyncio.Task | None = None
 
     async def process_audio():
-        nonlocal audio_chunks
+        nonlocal audio_chunks, audio_size, audio_overflow
         pcm = b"".join(audio_chunks)
         audio_chunks = []
+        audio_size = 0
+        audio_overflow = False
         if not pcm: return
         await ws.send_json({"type": "status", "state": "Verifying Tools"})
         try:
@@ -166,7 +182,7 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "status", "state": "Idle"})
             return
         state["last_user_transcript"] = transcript
-        state["transcript_received_server_ts"] = time.time()
+        state["transcript_received_server_ts"] = control.timestamp()
         state["last_user_transcript_server_ts"] = state["transcript_received_server_ts"]
         state["voice_approval_verified"] = False
         # A spoken affirmative is accepted only for the exact offer already played to this session.
@@ -180,8 +196,15 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "status", "state": "Idle"}); return
         async with turn_lock:
             turn_started = time.perf_counter()
-            await harness.run_turn(state)
-            control.sessions[session_id]["turn_durations"].append(time.perf_counter() - turn_started)
+            try:
+                await harness.run_turn(state)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                control.alert("WARNING", "CONCIERGE_TURN_FAILED", session_id, type(exc).__name__)
+                await ws.send_json({"type": "telemetry", "message": "The assistant turn failed safely. Please try again."})
+            finally:
+                control.sessions[session_id]["turn_durations"].append(time.perf_counter() - turn_started)
         await ws.send_json({"type": "status", "state": "Idle"})
 
     try:
@@ -191,30 +214,84 @@ async def websocket_endpoint(ws: WebSocket):
                 if task and not task.done(): task.cancel()
                 break
             if message.get("bytes") is not None:
-                audio_chunks.append(message["bytes"])
+                if not audio_overflow:
+                    chunk = message["bytes"]
+                    if audio_size + len(chunk) > MAX_AUDIO_BYTES:
+                        audio_chunks.clear()
+                        audio_size = 0
+                        audio_overflow = True
+                        control.alert("WARNING", "WS_AUDIO_LIMIT", session_id, "Audio turn exceeded the 60 second input limit")
+                    else:
+                        audio_chunks.append(chunk)
+                        audio_size += len(chunk)
                 continue
             raw = message.get("text")
             if not raw: continue
-            event = json.loads(raw)
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                control.alert("WARNING", "WS_INVALID_JSON", session_id, "Ignored malformed websocket event")
+                await ws.send_json({"type": "telemetry", "message": "Malformed event ignored"})
+                continue
+            if not isinstance(event, dict):
+                control.alert("WARNING", "WS_INVALID_EVENT", session_id, "Ignored non-object websocket event")
+                continue
             kind = event.get("type")
             if kind == "USER_SPEAKING_START":
                 live = control.event(session_id, "USER_SPEAKING_START", interruption=bool(event.get("interruption")))
                 await ws.send_json({"type": "live_event", "event": live})
                 if event.get("interruption"):
                     control.sessions[session_id]["barge_ins"] += 1
-                if task and not task.done(): task.cancel()
+                if task and not task.done():
+                    cancelled_task = task
+                    cancelled_task.cancel()
+                    # Retire the canceled turn immediately so AUDIO_END for this
+                    # new utterance cannot be mistaken for an overlapping turn.
+                    task = None
+                    try:
+                        await asyncio.wait_for(asyncio.shield(cancelled_task), timeout=0.25)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
                 audio_chunks.clear()
+                audio_size = 0
+                audio_overflow = False
                 await ws.send_json({"type": "barge_in_ack"})
             elif kind == "AUDIO_END":
-                task = asyncio.create_task(process_audio())
+                if audio_overflow:
+                    audio_overflow = False
+                    audio_size = 0
+                    await ws.send_json({"type": "telemetry", "message": "Voice input exceeded the 60 second limit. Please try a shorter turn."})
+                elif task and not task.done():
+                    audio_chunks.clear()
+                    audio_size = 0
+                    control.alert("WARNING", "WS_DUPLICATE_AUDIO_END", session_id, "Ignored overlapping audio turn")
+                else:
+                    task = asyncio.create_task(process_audio())
             elif kind == "LOCATION":
-                state["user_location"] = {"lat": float(event.get("lat", 12.9716)), "lng": float(event.get("lng", 77.5946))}
+                try:
+                    lat = float(event.get("lat", 12.9716))
+                    lng = float(event.get("lng", 77.5946))
+                    if not math.isfinite(lat) or not math.isfinite(lng) or not -90 <= lat <= 90 or not -180 <= lng <= 180:
+                        raise ValueError("coordinates out of range")
+                except (TypeError, ValueError, OverflowError):
+                    control.alert("WARNING", "WS_INVALID_LOCATION", session_id, "Ignored invalid location event")
+                    await ws.send_json({"type": "telemetry", "message": "Invalid location ignored; using the current location"})
+                    continue
+                state["user_location"] = {"lat": lat, "lng": lng}
                 control.sessions[session_id].update(state["user_location"])
             elif kind == "TTS_PLAYBACK_COMPLETED":
                 offer = state.get("pending_offer")
-                if offer and event.get("offer_id") == offer.get("offer_id"):
+                supplied_token = event.get("playback_ack_token", "")
+                expected_token = offer.get("playback_ack_token", "") if offer else ""
+                if (offer and event.get("offer_id") == offer.get("offer_id")
+                        and offer.get("playback_ack_pending") is True
+                        and isinstance(supplied_token, str) and expected_token
+                        and secrets.compare_digest(supplied_token, expected_token)):
                     offer["offer_playback_verified"] = True
                     offer["playback_completed_server_ts"] = control.timestamp()
+                    offer["playback_ack_pending"] = False
+                    offer["playback_ack_received"] = True
+                    offer["playback_ack_token"] = None
                     control.playback_ack(offer["offer_id"], offer["playback_completed_server_ts"])
                     control.sessions[session_id]["playback_acks"] += 1
                     control.sessions[session_id]["playback_offers"] += 1
@@ -223,9 +300,17 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "playback_verification", "status": "verified", "offer_id": offer["offer_id"]})
             elif kind == "TTS_PLAYBACK_INTERRUPTED":
                 offer = state.get("pending_offer")
-                if offer and event.get("offer_id") == offer.get("offer_id"):
+                supplied_token = event.get("playback_ack_token", "")
+                expected_token = offer.get("playback_ack_token", "") if offer else ""
+                if (offer and event.get("offer_id") == offer.get("offer_id")
+                        and offer.get("playback_ack_pending") is True
+                        and isinstance(supplied_token, str) and expected_token
+                        and secrets.compare_digest(supplied_token, expected_token)):
                     offer["offer_playback_verified"] = False
                     offer["playback_completed_server_ts"] = None
+                    offer["playback_ack_pending"] = False
+                    offer["playback_ack_received"] = False
+                    offer["playback_ack_token"] = None
                     control.sessions[session_id]["playback_offers"] += 1
                     control.event(session_id, "TTS_PLAYBACK_INTERRUPTED", offer_id=offer["offer_id"])
                     await ws.send_json({"type": "live_event", "event": control.events[-1]})

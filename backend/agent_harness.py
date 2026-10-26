@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import secrets
 import time
 from typing import Any, TypedDict
 
@@ -132,7 +133,7 @@ class AgentHarness:
                 receipt = {}
                 if call["name"] == "execute_reservation":
                     offer = state.get("pending_offer") or {}
-                    offer_id = hashlib.sha256(f"{state['session_id']}:{call['args'].get('place_id', '')}:{call['args'].get('time_slot', '')}:{call['args'].get('party_size', '')}:{call['args'].get('hold_token', '')}".encode()).hexdigest()
+                    offer_id = Enclave.offer_id(state["session_id"], call["args"])
                     playback_ts = offer.get("playback_completed_server_ts")
                     transcript_ts = state.get("last_user_transcript_server_ts")
                     receipt = {"offer_id": offer_id,
@@ -235,7 +236,12 @@ class AgentHarness:
                 if offer and _contains_offer_terms(response, offer):
                     offer["offer_playback_verified"] = False
                     offer["playback_completed_server_ts"] = None
-                    payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True})
+                    offer["playback_ack_pending"] = True
+                    offer["playback_ack_received"] = False
+                    offer["playback_ack_token"] = secrets.token_urlsafe(24)
+                    offer["audio_dispatched_server_ts"] = cp.timestamp() if cp else time.time()
+                    payload.update({"offer_id": offer["offer_id"], "requires_playback_ack": True,
+                                    "playback_ack_token": offer["playback_ack_token"]})
                 await _emit(state, payload)
         except Exception as exc:
             cp = getattr(self.enclave, "control_plane", None)
@@ -293,11 +299,13 @@ def _make_offer(state: dict[str, Any], details: dict[str, Any]) -> dict[str, Any
     time_slot = str(details["time_slot"])
     party_size = int(details["party_size"])
     hold_token = str(details["hold_token"])
-    offer_id = hashlib.sha256(f"{session_id}:{place_id}:{time_slot}:{party_size}:{hold_token}".encode()).hexdigest()
+    offer_id = hashlib.sha256(f"{session_id}:{place_id}:{time_slot}:{party_size}:{hold_token}".encode()).hexdigest()[:16]
     restaurant_name = str(details.get("restaurant_name") or next((r.get("name") for r in state.get("candidate_restaurants", []) if r.get("place_id") == place_id), place_id))
     return {"offer_id": offer_id, "place_id": place_id, "restaurant_name": restaurant_name, "time_slot": time_slot,
             "party_size": party_size, "hold_token": hold_token, "offer_playback_verified": False,
-            "playback_completed_server_ts": None}
+            "playback_completed_server_ts": None, "playback_ack_pending": False,
+            "playback_ack_received": False, "playback_ack_token": None,
+            "audio_dispatched_server_ts": None}
 
 def _contains_offer_terms(text: str, offer: dict[str, Any]) -> bool:
     normalized = text.casefold()

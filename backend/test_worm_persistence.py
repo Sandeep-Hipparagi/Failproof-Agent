@@ -1,5 +1,6 @@
 """Durable WORM ledger recovery and tamper detection. Developed by Sandeep Hipparagi."""
 from backend.control_plane import ControlPlane
+from concurrent.futures import ThreadPoolExecutor
 
 
 def _record_two_events(cp: ControlPlane):
@@ -48,4 +49,35 @@ def test_tamper_detection_marks_failed_and_locks_writes(tmp_path, monkeypatch):
     assert result["corrupted_block_index"] == 0
     assert tampered.analysis()["checks"]["CHECK_WORM_LEDGER_INTEGRITY"] is False
     assert any(alert["code"] == "WORM_LEDGER_TAMPER_DETECTED" for alert in tampered.alerts)
+
+
+def test_empty_and_malformed_ledgers_are_reported_without_raising(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "worm_audit_ledger.jsonl"
+    monkeypatch.setenv("FAILPROOF_LEDGER_PATH", str(ledger_path))
+    empty = ControlPlane()
+    assert empty.verify_ledger_integrity() == {
+        "integrity_verified": True, "block_height": 0, "corrupted_block_index": None}
+
+    ledger_path.write_text("[]\n{broken json\n", encoding="utf-8")
+    malformed = ControlPlane()
+    assert malformed.verify_ledger_integrity() == {
+        "integrity_verified": False, "block_height": 0, "corrupted_block_index": 0}
+    assert malformed.analysis()["checks"]["CHECK_WORM_LEDGER_INTEGRITY"] is False
+
+
+def test_parallel_ledger_writers_preserve_a_valid_chain(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "worm_audit_ledger.jsonl"
+    monkeypatch.setenv("FAILPROOF_LEDGER_PATH", str(ledger_path))
+    writers = [ControlPlane() for _ in range(4)]
+
+    def write_event(index: int) -> None:
+        cp = writers[index % len(writers)]
+        cp.audit(session_id=f"s-{index}", policy_id="policy_loop_and_idempotency",
+                 tool_name="search", verdict="ALLOW", reason=f"event {index}")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write_event, range(40)))
+
+    assert ControlPlane().verify_ledger_integrity() == {
+        "integrity_verified": True, "block_height": 40, "corrupted_block_index": None}
 
